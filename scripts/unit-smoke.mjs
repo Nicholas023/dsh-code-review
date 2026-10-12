@@ -247,4 +247,69 @@ t('collectPendingPaths：空路径/非 git 目录 → []（点名层静默跳过
   assert.deepEqual(collectPendingPaths(join(tmpdir(), 'no-such-git-repo-xyz')), []);
 });
 
+/* ---------- 7. 后台任务化（2026-10-13）新增 ---------- */
+t('buildReviewArgs：excludePaths → 每个 --exclude <p>（scan 全仓库时排除引擎目录）', () => {
+  const args = buildReviewArgs({ command: 'scan', repoPath: '/repo', excludePaths: ['engine/**', 'dist/**'] });
+  assert.ok(args.includes('--exclude'));
+  const i = args.indexOf('--exclude');
+  assert.equal(args[i + 1], 'engine/**');
+  assert.equal(args[i + 3], 'dist/**');
+  // 不传 excludePaths 时无 --exclude 尾巴（默认行为不回归）。
+  const plain = buildReviewArgs({ command: 'scan', repoPath: '/repo' });
+  assert.ok(!plain.includes('--exclude'));
+});
+
+t('DEFAULT_CONFIG.review_timeout_ms：后台任务语义放宽到 30 分钟（容忍慢模型）', () => {
+  assert.equal(DEFAULT_CONFIG.review_timeout_ms, 30 * 60 * 1000);
+});
+
+t('task-book：入队/读/更新/列表 状态机 + 原子落盘（隔离目录，不碰生产任务簿）', async () => {
+  const { tmpdir } = await import('node:os');
+  const { mkdtempSync, readFileSync, readdirSync, rmSync } = await import('node:fs');
+  const home = mkdtempSync(join(tmpdir(), 'dcr-tb-'));
+  const prev = process.env.DSH_REVIEW_HOME;
+  process.env.DSH_REVIEW_HOME = home;
+  try {
+    const tb = await import(new URL('../src/task-book.js', import.meta.url).href);
+    // enqueueTask 默认字段。
+    const id = tb.enqueueTask({ repoPath: '/r', command: 'scan', excludePaths: ['engine/**'] });
+    assert.ok(/^\d{8}-\d{6}-[a-z0-9]{4}$/.test(id), `任务 id 格式：${id}`);
+    let task = tb.readTask(id);
+    assert.equal(task.status, 'queued');
+    assert.equal(task.repoPath, '/r');
+    assert.equal(task.command, 'scan');
+    assert.deepEqual(task.excludePaths, ['engine/**']);
+    assert.equal(task.result, null);
+    // 原子落盘：任务文件存在且无 .tmp 残留。
+    const files = readdirSync(join(home, 'tasks'));
+    assert.ok(files.includes(`${id}.json`));
+    assert.ok(!files.some((f) => f.endsWith('.tmp')));
+    JSON.parse(readFileSync(join(home, 'tasks', `${id}.json`), 'utf8'));
+    // updateTask：字段合并 + 状态流转。
+    const run = tb.updateTask(id, { status: 'running', startedAt: '2026-01-01T00:00:00.000Z' });
+    assert.equal(run.status, 'running');
+    assert.equal(run.repoPath, '/r');
+    const done = tb.updateTask(id, { status: 'done', result: { ok: true, text: 'ok' } });
+    assert.equal(done.status, 'done');
+    assert.equal(done.result.ok, true);
+    // listTasks：倒序（后创建的排前面）且能读出状态。
+    const id2 = tb.enqueueTask({ repoPath: '/r2' });
+    const list = tb.listTasks(10);
+    assert.equal(list[0].id, id2);
+    assert.equal(list[1].id, id);
+  } finally {
+    process.env.DSH_REVIEW_HOME = prev;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+t('review-exec：模块可加载，executeReview 为异步执行函数（后台 serve 与工具共用同一执行体）', async () => {
+  const { executeReview } = await import(new URL('../src/review-exec.js', import.meta.url).href);
+  assert.equal(typeof executeReview, 'function');
+  const p = executeReview({ repoPath: '/nonexistent-repo-xyz', config: { review_timeout_ms: 30_000 } });
+  assert.ok(p instanceof Promise);
+  // 引擎在包内 bin/ 时此任务会真实启动引擎（不等待完成）；仅验证函数契约。
+  p.catch(() => {});
+});
+
 console.log(`\n${n} 项单元自检通过${process.exitCode ? '（有失败）' : '，全部 OK'}`);

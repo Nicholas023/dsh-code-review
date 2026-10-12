@@ -118,6 +118,7 @@ export function locateEngineBin(cfg) {
  * @param {string} [opts.commit]  指定提交（commit 模式 → --commit）。
  * @param {string} [opts.focus]   重点领域（→ --background）。
  * @param {string} [opts.repoPath] 仓库路径（→ --repo）。
+ * @param {string[]} [opts.excludePaths] 排除路径（→ 每个 --exclude <p>；如 engine/**）。
  * @returns {string[]} 参数字符串数组。
  */
 export function buildReviewArgs(opts) {
@@ -133,6 +134,11 @@ export function buildReviewArgs(opts) {
     }
     // uncommitted（默认）：不加 diff 定位参数（引擎默认审查工作区未提交改动）。
   }
+  if (Array.isArray(opts.excludePaths)) {
+    for (const p of opts.excludePaths) {
+      if (typeof p === 'string' && p.trim()) args.push('--exclude', p.trim());
+    }
+  }
   if (opts.focus) args.push('--background', opts.focus);
   // 会话内返回：agent 受众 = 仅摘要（无进度噪音，干净短输出）。
   args.push('--audience', 'agent');
@@ -145,11 +151,12 @@ export function buildReviewArgs(opts) {
  * @param {object} opts
  * @param {string} opts.bin   引擎二进制路径。
  * @param {string[]} opts.args 参数。
- * @param {number}  [opts.timeoutMs] 超时（默认 10 分钟）。
+ * @param {number}  [opts.timeoutMs] 进程超时兜底（默认 30 分钟——后台任务语义，
+ *                                   只防死循环挂死，不设紧限制拒绝慢模型）。
  * @param {object}  [opts.env]      额外环境变量（provider 注入位，步骤 5）。
  * @returns {Promise<{ok: boolean, code: number|null, stdout: string, stderr: string, timedOut?: boolean}>}
  */
-export function runEngine({ bin, args, timeoutMs = 10 * 60 * 1000, env = {} }) {
+export function runEngine({ bin, args, timeoutMs = 30 * 60 * 1000, env = {} }) {
   return new Promise((resolvePromise) => {
     let stdout = '';
     let stderr = '';
@@ -229,7 +236,9 @@ export async function probeEngineVersion(cfg) {
  * @param {object} dep
  * @param {object} dep.endpoint  resolveProvider 的产物：{url,protocol,model,keyEnv,providerLabel,extraBody?}
  * @param {string} dep.key       真实 key（调用方已用 resolveApiKey 取好）。
- * @param {number} [dep.timeoutMs] 每请求超时（秒）；缺省 600s。
+ * @param {number} [dep.timeoutMs] 引擎侧 LLM 单请求超时（毫秒→折算秒，下限 30s）；
+ *                                缺省 600 秒。调用方通常传任务级 review_timeout_ms，
+ *                                即「单请求上限 ≤ 任务整体上限」，慢模型宽容。
  * @returns {{ env: object, injected: boolean, note: string }}
  */
 export function prepareEngineEnv({ endpoint, key, timeoutMs = 600_000 }) {

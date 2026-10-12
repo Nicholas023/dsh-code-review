@@ -55,3 +55,25 @@ export function listSensitiveFiles(paths) {
     .filter(isSensitivePath)
     .map((path) => ({ path }));
 }
+
+/**
+ * 组装「敏感文件点名块」正文（判据⑥：报告里出现点名项；会话 tail 也保留一次）。
+ * 内容不送审、文件内容不读取——只点名提示人工确认是否该提交。
+ *
+ * @param {string[]} pendingPaths 本次待提交/待过目文件相对路径。
+ * @returns {string} 点名块 markdown（无命中返回空串）。
+ */
+export function buildSensitiveBlock(pendingPaths) {
+  const hits = listSensitiveFiles(pendingPaths);
+  if (hits.length === 0) return '';
+  const lines = hits.map((h, i) => `${i + 1}. \`${h.path}\``);
+  return [
+    '',
+    '## ⚠ 敏感文件点名（内容未送审，请人工确认是否该提交）',
+    '',
+    ...lines,
+    '',
+    '> 这些文件命中敏感路径模式，引擎已排除其内容（不送审）。请逐一确认：',
+    '> 若包含密钥/凭据/隐私信息，提交 GitHub 前应加入 .gitignore 或剔除。',
+  ].join('\n');
+}

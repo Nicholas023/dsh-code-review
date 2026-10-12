@@ -30,8 +30,10 @@ export const DEFAULT_CONFIG = {
   engine_bin: '',
   // 首启引导标记：true 表示尚未引导确认，apply 时输出引导消息。
   first_run: true,
-  // 评审超时（毫秒）：同步执行接受长任务，默认 10 分钟兜底。
-  review_timeout_ms: 10 * 60 * 1000,
+  // 评审超时（毫秒）：后台任务语义（2026-10-13 起）——进程级兜底上限，
+  // 默认 30 分钟宽容慢模型；前台不阻塞、会话无超时，此值只防任务死循环挂死。
+  // （引擎侧 OCR_LLM_TIMEOUT 单请求超时由 prepareEngineEnv 折算同一字段。）
+  review_timeout_ms: 30 * 60 * 1000,
 };
 
 /**

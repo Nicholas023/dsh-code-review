@@ -133,8 +133,10 @@ try {
 }
 
 check(
-  '注册了 code_review 工具（恰好 1 个）',
-  Array.isArray(registeredTools) && registeredTools.length === 1 && registeredTools[0]?.name === 'code_review',
+  '注册了 code_review 与 code_review_status 两个工具（后台任务形态）',
+  Array.isArray(registeredTools) && registeredTools.length === 2
+    && registeredTools.some((t) => t?.name === 'code_review')
+    && registeredTools.some((t) => t?.name === 'code_review_status'),
   JSON.stringify(registeredTools.map((t) => t?.name))
 );
 
@@ -170,16 +172,19 @@ if (patchExists) {
 }
 
 /* ---------- 6. 工具对象结构就绪 ---------- */
-if (registeredTools.length === 1) {
-  const tool = registeredTools[0];
-  check('工具对象有 name = code_review', tool?.name === 'code_review');
-  check('工具对象有 description（微调模型可见）', typeof tool?.description === 'string' && tool.description.length > 50);
+if (registeredTools.length >= 1) {
+  const tool = registeredTools.find((t) => t?.name === 'code_review');
+  const statusTool = registeredTools.find((t) => t?.name === 'code_review_status');
+  check('code_review 工具有 name', tool?.name === 'code_review');
+  check('code_review 工具有 description（微调模型可见）', typeof tool?.description === 'string' && tool.description.length > 50);
   check(
-    '工具对象有 parameters JSON Schema（必填项合理）',
+    'code_review 工具有 parameters JSON Schema（必填项合理）',
     typeof tool?.parameters?.type === 'string' && typeof tool?.parameters?.properties === 'object'
   );
-  check('工具对象有 execute（同步执行入口）', typeof tool?.execute === 'function');
-  check('工具对象有 output schema（结果渲染位）', typeof tool?.output?.schema === 'object' || typeof tool?.output?.render === 'function');
+  check('code_review 工具 parameters 含 exclude_paths（后台扫描排除位）', 'exclude_paths' in (tool?.parameters?.properties ?? {}));
+  check('code_review 工具 execute 为异步函数（后台投递入口）', typeof tool?.execute === 'function');
+  check('code_review 工具 output schema（结果渲染位）', typeof tool?.output?.schema === 'object' || typeof tool?.output?.render === 'function');
+  check('code_review_status 工具（参数 task_id 查询/省略列最近）', typeof statusTool?.execute === 'function' && 'task_id' in (statusTool?.parameters?.properties ?? {}));
 } else {
   check('工具对象结构就绪', false, '未捕获到工具对象');
 }
