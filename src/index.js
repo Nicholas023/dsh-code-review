@@ -360,24 +360,25 @@ function registerCommand(ctx, getConfig) {
  * @returns {Function|void} 卸载函数（若有需清理的资源）。
  */
 export function apply(ctx, configRaw) {
-  // volatile 解包 + 归一化（vision 踩坑：不解包会以 [object Object] 启用失败）。
-  const cfg = normalizeConfig(pickOverrides(configRaw));
-
-  // 运行时快照：工具执行时惰性读最新设置；无 settings 服务时回退初始 cfg。
-  // ⚠ 生命周期纪律：不直接摸 ctx.settings（未注入服务访问即抛 without inject）；
-  // 初始为 cfg 兜底，settings 服务就绪后由下方 ctx.inject 回调升级为实时快照。
-  let sourceGetter = () => cfg;
+  // 运行时配置真源 = entry config（0.2.0 通道，configForms 保存后即回传 patch、
+  // volatile 字段为可热更新包装对象，须**每次读取时重新解包**才能拿到最新值，
+  // 照宿主范式「调用方每次读取配置都经 pickOverrides」范式——不能只在启动时解包一次）。
+  const entryConfig = () => normalizeConfig(pickOverrides(configRaw));
+  // 兜底 sourceGetter：settings 服务未就绪时仅 entry 配置（含默认值兜底）。
+  let sourceGetter = entryConfig;
   const getConfig = () => sourceGetter();
   ctx.inject(['settings'], (sctx) => {
-    // settings 服务就绪后更新 sourceGetter 为实时快照读取。
+    // settings 服务就绪后：entry config 优先，0.1.x settings 命名空间快照仅作补充覆盖。
     sourceGetter = () => {
       try {
         const snapshot = sctx.settings.get?.(SETTINGS_NS);
-        if (snapshot && typeof snapshot === 'object') return normalizeConfig({ ...cfg, ...snapshot });
+        if (!snapshot || typeof snapshot !== 'object') return entryConfig();
+        // entry 覆盖快照：0.2.0 面板保存的字段优先（用户最新操作），快照补 entry 未显式设置的字段。
+        return normalizeConfig({ ...snapshot, ...pickOverrides(configRaw) });
       } catch {
-        /* 读快照失败回退初始 cfg */
+        /* 读快照/解包失败回退 entry 配置 */
+        return entryConfig();
       }
-      return cfg;
     };
   });
 
@@ -386,18 +387,6 @@ export function apply(ctx, configRaw) {
 
   // 设置注册（能力探测，失败降级）。
   registerSettings(ctx);
-  ctx.inject(['settings'], (sctx) => {
-    // settings 服务就绪后更新 sourceGetter 为实时快照读取。
-    sourceGetter = () => {
-      try {
-        const snapshot = sctx.settings.get?.(SETTINGS_NS);
-        if (snapshot && typeof snapshot === 'object') return normalizeConfig({ ...cfg, ...snapshot });
-      } catch {
-        /* 忽略 */
-      }
-      return cfg;
-    };
-  });
 
   // 工具注册（ctx.effect 内，卸载时 dispose）。
   const disposers = [];
