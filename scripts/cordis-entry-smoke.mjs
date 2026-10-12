@@ -58,13 +58,34 @@ check(
 );
 
 /* ---------- 2. 附件模块可导入 ---------- */
-for (const m of ['config', 'settings-schema', 'runner', 'report', 'sensitive-list']) {
+for (const m of ['config', 'settings-schema', 'plugin-config', 'runner', 'report', 'sensitive-list']) {
   try {
     await import(new URL(`../src/${m}.js`, import.meta.url).href);
     check(`src/${m}.js 可导入`, true);
   } catch (error) {
     check(`src/${m}.js 可导入`, false, String(error));
   }
+}
+
+/* ---------- 2.5 0.2.0 设置契约：插件导出 Config（configForms 表单真源） ----------
+ * 宿主 describe 按 entry 读 entry.fiber.runtime.Config 投影表单（见第 11 条）；
+ * 缺 Config 导出 → describe 无本插件行 → 客户端表单 status=unavailable 不可写。 */
+{
+  let ok = false;
+  let detail = '缺 Config 导出';
+  try {
+    const mod = await import(new URL('../src/index.js', import.meta.url).href);
+    if (mod.Config && typeof mod.Config.toJSON === 'function') {
+      const serialized = mod.Config.toJSON();
+      const root = serialized?.refs?.[serialized?.uid];
+      const keys = Object.keys(root?.dict ?? {});
+      ok = keys.length > 0 && ['review_model', 'report_dir', 'engine_bin', 'first_run'].every((k) => keys.includes(k));
+      detail = `Config 键=${keys.join(',')}`;
+    }
+  } catch (error) {
+    detail = String(error);
+  }
+  check('src/index.js 导出 0.2.0 Config schema（四键齐全）', ok, detail);
 }
 
 /* ---------- 3. 最小 ctx 垫片 + apply ---------- */

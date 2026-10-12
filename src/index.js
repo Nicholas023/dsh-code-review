@@ -435,5 +435,8 @@ export function apply(ctx, configRaw) {
 
 /* 默认配置导出（宿主 schema 校验/测试引用）。 */
 export { DEFAULT_CONFIG, SETTINGS_NS };
+/* 0.2.0 宿主设置页可编辑配置 schema（configForms 表单字段真源，见 plugin-config.js）；
+   设置命名空间 settings.register 仍保留（供 0.1.x settings 快照通道保底读取）。 */
+export { Config } from './plugin-config.js';
 /* 评审执行体导出（e2e/单元判据载体：sensitive-e2e、后续步骤可复现链路）。 */
 export { reviewOnce, buildSensitiveBlock };
