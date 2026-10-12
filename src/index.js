@@ -301,39 +301,56 @@ function registerSettings(ctx) {
 
 /**
  * 注册斜杠命令 /review（手动精确传参入口，与 code_review 工具共用执行体）。
- * 宿主若不支持 cordis command 注册（能力差异），仅告警，工具仍为主力入口。
+ *
+ * ⚠ 生命周期纪律（2026-10-12 生产实装踩坑）：Cordis 在 apply 阶段**未注入的
+ * 服务属性直接访问即抛** `cannot get property 'command' without inject`
+ * （typeof 检查也拦不住——读属性本身就炸）。正确姿势与 宿主既有插件范式 一致：
+ * 可选服务用 `ctx.inject(['command'], cb)` 动态注入，宿主提供 command 服务时
+ * 才注册；不写静态 `inject` 数组（那是「必需的才用」），缺服务不阻塞插件激活，
+ * 工具 code_review 仍为主力入口。
  *
  * @param {object} ctx       Cordis 上下文。
  * @param {Function} getConfig 实时配置读取函数。
  */
 function registerCommand(ctx, getConfig) {
-  if (typeof ctx.command !== 'function') return;
   try {
-    ctx
-      .command('review', '智能代码审查：对仓库 diff/扫描做评审（安全/找bug/冗余三视角），返回问题清单并落报告。')
-      .option('mode, -m <mode>', '评审模式：uncommitted（默认）/ branch / commit / scan', { fallback: 'uncommitted' })
-      .option('repo, -r <repo>', '仓库路径（默认当前目录）')
-      .option('base, -b <base>', 'branch 模式的对比基线（默认 main）', { fallback: 'main' })
-      .option('head <head>', 'branch 模式的目标分支')
-      .option('commit, -c <commit>', 'commit 模式的提交号')
-      .option('focus, -f <focus>', '本次评审重点领域（一句话背景）')
-      .action(async (argv) => {
-        const text = await reviewOnce(ctx, getConfig, {
-          mode: argv.mode,
-          repo_path: argv.repo,
-          base_ref: argv.base,
-          head_ref: argv.head,
-          commit: argv.commit,
-          focus: argv.focus,
-        });
-        return text;
-      });
+    ctx.inject(['command'], (sctx) => {
+      try {
+        sctx
+          .command('review', '智能代码审查：对仓库 diff/扫描做评审（安全/找bug/冗余三视角），返回问题清单并落报告。')
+          .option('mode, -m <mode>', '评审模式：uncommitted（默认）/ branch / commit / scan', { fallback: 'uncommitted' })
+          .option('repo, -r <repo>', '仓库路径（默认当前目录）')
+          .option('base, -b <base>', 'branch 模式的对比基线（默认 main）', { fallback: 'main' })
+          .option('head <head>', 'branch 模式的目标分支')
+          .option('commit, -c <commit>', 'commit 模式的提交号')
+          .option('focus, -f <focus>', '本次评审重点领域（一句话背景）')
+          .action(async (argv) => {
+            const text = await reviewOnce(ctx, getConfig, {
+              mode: argv.mode,
+              repo_path: argv.repo,
+              base_ref: argv.base,
+              head_ref: argv.head,
+              commit: argv.commit,
+              focus: argv.focus,
+            });
+            return text;
+          });
+      } catch (error) {
+        sctx.logger?.warn?.(`[dsh-code-review] /review 命令注册失败（工具 code_review 仍可用）：${String(error?.message ?? error)}`);
+      }
+    });
   } catch (error) {
-    ctx.logger?.warn?.(`[dsh-code-review] /review 命令注册失败（工具 code_review 仍可用）：${String(error?.message ?? error)}`);
+    // ctx.inject 本身抛错（宿主能力差异）→ 仅告警，不阻塞挂载。
+    ctx.logger?.warn?.(`[dsh-code-review] command 服务不可用，/review 跳过（工具 code_review 仍为主力）：${String(error?.message ?? error)}`);
   }
 }
 
 /* ═══ 插件入口 ═══ */
+
+// 必需服务注入声明见第 35 行（export const inject = ['tools', 'settings']）：
+// tools = code_review 工具（核心入口）、settings = 设置面板，均为静态必需注入；
+// command（/review 命令）为可选增强 → registerCommand 内 ctx.inject 动态注入，
+// 缺 command 服务不阻塞挂载（工具仍为主力入口）。
 
 /**
  * Cordis apply 入口。
@@ -347,20 +364,22 @@ export function apply(ctx, configRaw) {
   const cfg = normalizeConfig(pickOverrides(configRaw));
 
   // 运行时快照：工具执行时惰性读最新设置；无 settings 服务时回退初始 cfg。
-  let sourceGetter = null;
-  const getConfig = () => (sourceGetter ? sourceGetter() : cfg);
-  const getRuntimeConfig = () => {
-    if (typeof ctx.settings?.get === 'function' && typeof ctx.settings?.patch === 'function') {
+  // ⚠ 生命周期纪律：不直接摸 ctx.settings（未注入服务访问即抛 without inject）；
+  // 初始为 cfg 兜底，settings 服务就绪后由下方 ctx.inject 回调升级为实时快照。
+  let sourceGetter = () => cfg;
+  const getConfig = () => sourceGetter();
+  ctx.inject(['settings'], (sctx) => {
+    // settings 服务就绪后更新 sourceGetter 为实时快照读取。
+    sourceGetter = () => {
       try {
-        const snapshot = ctx.settings.get(SETTINGS_NS);
+        const snapshot = sctx.settings.get?.(SETTINGS_NS);
         if (snapshot && typeof snapshot === 'object') return normalizeConfig({ ...cfg, ...snapshot });
       } catch {
         /* 读快照失败回退初始 cfg */
       }
-    }
-    return cfg;
-  };
-  sourceGetter = getRuntimeConfig;
+      return cfg;
+    };
+  });
 
   // 首启引导。
   welcomeOnce(ctx, getConfig());
