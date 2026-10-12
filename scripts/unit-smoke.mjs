@@ -173,10 +173,16 @@ t('createModelSource()：listCandidates 首项为 session', () => {
 });
 
 /* ---------- 8. credentials（步骤5，纯函数样例） ---------- */
-t('parseCredentialsText：提取顶层 NAME: value', () => {
-  const text = '# comment\nDEEPSEEK_API_KEY: sk-abc123\nrefs:\n  PARTNER_API_KEY: sk-other\n';
+t('parseCredentialsText：refs 段与顶层键均可提取', () => {
+  const text = 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc123\n  PARTNER_API_KEY: sk-other\n';
   assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'sk-abc123');
-  assert.equal(parseCredentialsText(text, 'PARTNER_API_KEY'), ''); // 只认顶层，不认嵌套
+  assert.equal(parseCredentialsText(text, 'PARTNER_API_KEY'), 'sk-other');
+});
+t('parseCredentialsText：深缩进（records 段）不误读', () => {
+  const text = 'records:\n  client-connection/session\n    payload:\n      secret: inner-1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n';
+  // 6 空格缩进的 secret 不应被当成引用名命中。
+  assert.equal(parseCredentialsText(text, 'secret'), '');
+  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'sk-abc');
 });
 t('parseCredentialsText：= 与引号变体', () => {
   const text = 'KEY_WITH_EQ=sk-x1\nKEY_QUOTED: "sk-x2"\n';

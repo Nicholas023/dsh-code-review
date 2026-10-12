@@ -66,6 +66,7 @@ npm run unit                         # 确定性模块自检（28 项，不联�
 npm run smoke                        # Cordis 入口冒烟自检（挂载前提验证）
 npm run e2e-engine                   # 引擎侧端到端（真实 DeepSeek 官方评审，需本机凭据）
 npm run e2e-plugin                   # 插件管道端到端（model-provider→credentials→runner）
+npm run e2e-switch                   # 切模型端到端（默认  异构评审实证，可传模型 id）
 npm run selfcheck                    # unit + smoke 全量
 ```
 

@@ -19,30 +19,32 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const NM = join(ROOT, 'node_modules');
 
-/** 本地 schema 依赖来源（生产 profile 依赖层，只读引用，绝不修改）。 */
+/** 本地 schema 依赖来源（生产 profile 依赖层，只读引用，绝不修改）。
+ * 条目：[scope|null, name, 源绝对路径]；scope 为 null 表示无作用域裸包。 */
 const SOURCES = [
   ['@deepseek-ai', 'schemastery', 'C:/Users/HP/.dsh/profiles/node_modules/@deepseek-ai/schemastery'],
   ['@deepseek-ai', 'cosmokit', 'C:/Users/HP/.dsh/profiles/node_modules/@deepseek-ai/cosmokit'],
   ['@standard-schema', 'spec', 'C:/Users/HP/.dsh/profiles/node_modules/@standard-schema/spec'],
+  [null, 'js-yaml', 'C:/Users/HP/.dsh/profiles/node_modules/js-yaml'],
 ];
 
 let linked = 0;
 let skipped = 0;
 for (const [scope, name, src] of SOURCES) {
-  const dest = join(NM, scope, name);
+  const dest = scope ? join(NM, scope, name) : join(NM, name);
   // 源包必须存在才算数（缺一个就明确报出来，不静默）。
   if (!existsSync(src)) {
     console.log(`✘ 源缺失（跳过，运行时将以 npm i 安装）：${src}`);
     continue;
   }
   if (existsSync(dest)) {
-    console.log(`• 已存在（跳过）：${join(scope, name)}`);
+    console.log(`• 已存在（跳过）：${scope ? join(scope, name) : name}`);
     skipped += 1;
     continue;
   }
-  mkdirSync(join(NM, scope), { recursive: true });
+  if (scope) mkdirSync(join(NM, scope), { recursive: true });
   symlinkSync(src, dest, 'junction');
-  console.log(`✔ 已连接：${join(scope, name)}`);
+  console.log(`✔ 已连接：${scope ? join(scope, name) : name}`);
   linked += 1;
 }
 

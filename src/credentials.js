@@ -8,17 +8,19 @@
  *
  * 安全卫生：返回值只在调用进程内存中流转，随后经 spawn env 传给引擎子进程；
  * 绝不写盘、绝不进日志、绝不进工具输出。yaml 解析用细粒度正则——只认
- * `NAME: value` / `NAME=value` 顶层条目，不做通用 YAML 展开（避免误读嵌套）。
+ * `NAME: value` / `NAME=value`（0~4 空格缩进），不做通用 YAML 展开。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-/** 从文本中提取顶层 `NAME: value` / `NAME=value`（带引号宽容）。
- * 语义：只认「行首无缩进」的顶层条目——嵌套（如 refs: 下的键）不匹配，
- * 避免误读非本项目凭据。 */
+/** 从凭据文本中提取指定引用名的值。
+ * 实况（2026-10-12 实证 ~/.dsh/.credentials.yaml）：所有凭据引用在
+ * `refs:` 段下（缩进 2），顶层只有 version/refs/records。因此匹配
+ * 「0~4 空格缩进 + NAME: value」（兼容顶层无缩进与 refs 段 2 空格），
+ * 刻意不匹配更深缩进（如 records 段），避免误读非凭据内容。 */
 export function parseCredentialsText(text, name) {
-  const re = new RegExp(`^${escapeRe(name)}\\s*[:=]\\s*['"]?([^\\s'"]+)['"]?\\s*$`, 'm');
+  const re = new RegExp(`^ {0,4}${escapeRe(name)}\\s*[:=]\\s*['"]?([^\\s'"]+)['"]?\\s*$`, 'm');
   const m = text.match(re);
   return m ? m[1] : '';
 }
