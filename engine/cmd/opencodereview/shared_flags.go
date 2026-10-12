@@ -1,0 +1,261 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/alibaba/open-code-review/internal/config/template"
+	"github.com/spf13/cobra"
+)
+
+func addRepoFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "repo", "", "root directory of the git repository (default: current dir)")
+}
+
+func addRuleFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "rule", "", "path to JSON file with system review rules")
+}
+
+func addDiffFlags(cmd *cobra.Command, from, to, commit *string) {
+	cmd.Flags().StringVar(from, "from", "", "source ref to start diff from (e.g., 'main')")
+	cmd.Flags().StringVar(to, "to", "", "target ref to end diff at (e.g., 'feature-branch')")
+	cmd.Flags().StringVarP(commit, "commit", "c", "", "single commit hash or tag to review (vs its parent)")
+}
+
+func addBackgroundFlags(cmd *cobra.Command, background, backgroundFile *string) {
+	cmd.Flags().StringVarP(background, "background", "b", "", "optional requirement/business context for the review")
+	cmd.Flags().StringVarP(backgroundFile, "background-file", "B", "", "path to a Markdown file used as review background (takes precedence over --background)")
+}
+
+func addOutputFlags(cmd *cobra.Command, format, audience *string) {
+	cmd.Flags().StringVarP(format, "format", "f", "text", "output format: text, json, or sarif")
+	cmd.Flags().StringVar(audience, "audience", "human", "output audience: human (show progress; on stderr for json/sarif) or agent (summary only)")
+	cmd.RegisterFlagCompletionFunc("format", completeEnum("text", "json", "sarif"))
+	cmd.RegisterFlagCompletionFunc("audience", completeEnum("human", "agent"))
+}
+
+// addOutputPathFlag registers --output/-o: write results to a UTF-8 file
+// instead of stdout. "" or "-" keeps stdout; a real path is created lazily on
+// the first write so a failed run never truncates an existing file.
+func addOutputPathFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVarP(target, "output", "o", "", "write results to a UTF-8 file (default: stdout; '-' also means stdout)")
+}
+
+func addExcludeFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "exclude", "", "comma-separated gitignore-style patterns to exclude; merged with rule.json excludes")
+}
+
+const taskTimeoutHelp = "concurrent task budget in minutes, including LLM requests and retries (0 = unlimited); independent per-request timeout: OCR_LLM_TIMEOUT or provider timeout_sec in seconds (default 300)"
+
+func addConcurrencyFlags(cmd *cobra.Command, concurrency, timeout, maxTools, maxGitProcs, maxTokens, maxTokensBudget *int) {
+	cmd.Flags().IntVar(concurrency, "concurrency", 8, "max concurrent subtasks")
+	cmd.Flags().IntVar(timeout, "timeout", 15, taskTimeoutHelp)
+	cmd.Flags().IntVar(maxTools, "max-tools", 0, "max tool call rounds per subtask (0 = template default; min 50)")
+	cmd.Flags().IntVar(maxGitProcs, "max-git-procs", 16, "max concurrent git subprocesses")
+	cmd.Flags().IntVar(maxTokens, "max-tokens", 0, "per-group prompt token ceiling (0 = configured or template default)")
+	cmd.Flags().IntVar(maxTokensBudget, "max-tokens-budget", 0, "cap total token usage (input+output) for this review; checked before every LLM round, so a group already over budget gets one final round to submit findings and is reported as failed(budget), and no further groups are dispatched. Partial results are published and review exits 0; it exits non-zero only if every selected item failed (0 = unlimited)")
+}
+
+func addModelFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "model", "", "override LLM model for this run (e.g., claude-opus-4-6)")
+}
+
+func addProviderFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "provider", "", "override configured LLM provider for this run")
+}
+
+func addToolsFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "tools", "", "path to JSON tools config file (default: embedded)")
+}
+
+func addPreviewFlag(cmd *cobra.Command, target *bool) {
+	cmd.Flags().BoolVarP(target, "preview", "p", false, "preview which files will be reviewed without running the LLM")
+}
+
+func completeEnum(values ...string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return values, cobra.ShellCompDirectiveNoFileComp
+	}
+}
+
+// --- Validation functions ---
+
+func validateDiffMode(from, to, commit string) error {
+	modeCount := 0
+	if from != "" || to != "" {
+		modeCount++
+	}
+	if commit != "" {
+		modeCount++
+	}
+	if modeCount > 1 {
+		return fmt.Errorf("only one review mode allowed (--from/--to or --commit)")
+	}
+	if from != "" && to == "" {
+		return fmt.Errorf("--to is required when --from is specified")
+	}
+	if to != "" && from == "" {
+		return fmt.Errorf("--from is required when --to is specified")
+	}
+	return nil
+}
+
+func validateAudience(audience string) error {
+	switch audience {
+	case "human", "agent":
+		return nil
+	default:
+		return fmt.Errorf("invalid --audience value %q: must be 'human' or 'agent'", audience)
+	}
+}
+
+func validateOutputFormat(format string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(format))
+	switch normalized {
+	case "text", "json", "sarif":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid --format value %q: must be 'text', 'json', or 'sarif'", format)
+	}
+}
+
+func validateReviewOptions(opts *reviewOptions) error {
+	if err := validateDiffMode(opts.from, opts.to, opts.commit); err != nil {
+		return err
+	}
+	if opts.preview && opts.resume != "" {
+		return fmt.Errorf("--preview and --resume cannot be used together")
+	}
+	if err := validateAudience(opts.audience); err != nil {
+		return err
+	}
+	normalizedFormat, err := validateOutputFormat(opts.outputFormat)
+	if err != nil {
+		return err
+	}
+	opts.outputFormat = normalizedFormat
+	const minMaxTools = 50
+	if opts.maxTools < 0 {
+		return fmt.Errorf("--max-tools must be a non-negative integer (0 means use template default)")
+	}
+	if opts.maxTools > 0 && opts.maxTools < minMaxTools {
+		fmt.Fprintf(os.Stderr, "[codecheck] --max-tools %d is below minimum %d, using %d\n", opts.maxTools, minMaxTools, minMaxTools)
+		opts.maxTools = minMaxTools
+	}
+	if opts.maxGitProcs < 0 {
+		return fmt.Errorf("--max-git-procs must be a non-negative integer (0 means use default 16)")
+	}
+	if opts.maxTokens < 0 {
+		return fmt.Errorf("--max-tokens must be a non-negative integer (0 means use configured or template default)")
+	}
+	if opts.maxTokensBudget < 0 {
+		return fmt.Errorf("--max-tokens-budget must be a non-negative integer (0 means unlimited)")
+	}
+	if opts.effort != "" {
+		if _, err := template.ParseEffort(opts.effort); err != nil {
+			return fmt.Errorf("--effort: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateScanOptions(opts *scanOptions) error {
+	if err := validateAudience(opts.audience); err != nil {
+		return err
+	}
+	normalizedFormat, err := validateOutputFormat(opts.outputFormat)
+	if err != nil {
+		return err
+	}
+	opts.outputFormat = normalizedFormat
+	if opts.maxTools < 0 {
+		return fmt.Errorf("--max-tools must be a non-negative integer (0 means use template default)")
+	}
+	if opts.maxGitProcs < 0 {
+		return fmt.Errorf("--max-git-procs must be a non-negative integer (0 means use default 16)")
+	}
+	if opts.maxTokens < 0 {
+		return fmt.Errorf("--max-tokens must be a non-negative integer (0 means use configured or template default)")
+	}
+	if opts.preview && opts.resume != "" {
+		return fmt.Errorf("--preview and --resume cannot be used together")
+	}
+	if opts.maxTokensBudget < 0 {
+		return fmt.Errorf("--max-tokens-budget must be a non-negative integer (0 means unlimited)")
+	}
+	return nil
+}
+
+func validateDelegateOptions(opts *delegateOptions) error {
+	if err := validateDiffMode(opts.from, opts.to, opts.commit); err != nil {
+		return err
+	}
+	if opts.format != "text" && opts.format != "json" {
+		return fmt.Errorf("invalid --format value %q: must be 'text' or 'json'", opts.format)
+	}
+	return nil
+}
+
+// registerReviewFlags registers all review command flags on cmd, binding to opts.
+func registerReviewFlags(cmd *cobra.Command, opts *reviewOptions) {
+	addToolsFlag(cmd, &opts.toolConfigPath)
+	addRuleFlag(cmd, &opts.rulePath)
+	addRepoFlag(cmd, &opts.repoDir)
+	addDiffFlags(cmd, &opts.from, &opts.to, &opts.commit)
+	cmd.Flags().StringVar(&opts.resume, "resume", "", "resume from a previous review session id")
+	cmd.RegisterFlagCompletionFunc("resume", completeSessionIDs)
+	addExcludeFlag(cmd, &opts.excludes)
+	addOutputFlags(cmd, &opts.outputFormat, &opts.audience)
+	addOutputPathFlag(cmd, &opts.outputPath)
+	addConcurrencyFlags(cmd, &opts.concurrency, &opts.concurrentTaskTimeout, &opts.maxTools, &opts.maxGitProcs, &opts.maxTokens, &opts.maxTokensBudget)
+	addBackgroundFlags(cmd, &opts.background, &opts.backgroundFile)
+	addProviderFlag(cmd, &opts.provider)
+	addModelFlag(cmd, &opts.model)
+	cmd.Flags().StringVar(&opts.effort, "effort", "", "review effort preset: low | medium | high (\"\" = configured or default medium)")
+	cmd.RegisterFlagCompletionFunc("effort", completeEnum(template.EffortNames()...))
+	cmd.Flags().BoolVar(&opts.noFilter, "no-filter", false, "keep all review comments without LLM post-filtering")
+	addPreviewFlag(cmd, &opts.preview)
+}
+
+// registerScanFlags registers all scan command flags on cmd, binding to opts.
+func registerScanFlags(cmd *cobra.Command, opts *scanOptions) {
+	addToolsFlag(cmd, &opts.toolConfigPath)
+	addRuleFlag(cmd, &opts.rulePath)
+	addRepoFlag(cmd, &opts.repoDir)
+	cmd.Flags().StringVar(&opts.paths, "path", "", "comma-separated repo-relative directories or files to scan (default: whole repo)")
+	addExcludeFlag(cmd, &opts.excludes)
+	addOutputFlags(cmd, &opts.outputFormat, &opts.audience)
+	addOutputPathFlag(cmd, &opts.outputPath)
+	cmd.Flags().IntVar(&opts.concurrency, "concurrency", 8, "max concurrent subtasks")
+	cmd.Flags().IntVar(&opts.concurrentTaskTimeout, "timeout", 15, taskTimeoutHelp)
+	cmd.Flags().IntVar(&opts.maxTools, "max-tools", 0, "max tool call rounds per subtask; only takes effect when greater than template default")
+	cmd.Flags().IntVar(&opts.maxGitProcs, "max-git-procs", 16, "max concurrent git subprocesses")
+	cmd.Flags().IntVar(&opts.maxTokens, "max-tokens", 0, "per-file prompt token ceiling (0 = configured or template default)")
+	cmd.Flags().IntVar(&opts.maxTokensBudget, "max-tokens-budget", 0, "cap total token usage; checked before every LLM round and at dispatch (0 = unlimited)")
+	cmd.Flags().StringVarP(&opts.background, "background", "b", "", "optional requirement/business context for the scan")
+	cmd.Flags().BoolVarP(&opts.preview, "preview", "p", false, "preview which files will be scanned without running the LLM")
+	cmd.Flags().BoolVar(&opts.noPlan, "no-plan", false, "skip the per-file PLAN_TASK pre-pass")
+	cmd.Flags().BoolVar(&opts.noDedup, "no-dedup", false, "skip the per-batch DEDUP_TASK")
+	cmd.Flags().BoolVar(&opts.noSummary, "no-summary", false, "skip the post-run PROJECT_SUMMARY_TASK")
+	cmd.Flags().StringVar(&opts.batch, "batch", "", "override BATCH_STRATEGY: none | by-language | by-directory")
+	addProviderFlag(cmd, &opts.provider)
+	addModelFlag(cmd, &opts.model)
+	cmd.Flags().StringVar(&opts.resume, "resume", "", "resume from a previous scan session id")
+	cmd.RegisterFlagCompletionFunc("batch", completeEnum("none", "by-language", "by-directory"))
+}
+
+// registerDelegateFlags registers all delegate shared flags on cmd, binding to opts.
+func registerDelegateFlags(cmd *cobra.Command, opts *delegateOptions) {
+	addRepoFlag(cmd, &opts.repoDir)
+	addDiffFlags(cmd, &opts.from, &opts.to, &opts.commit)
+	addExcludeFlag(cmd, &opts.excludes)
+	addRuleFlag(cmd, &opts.rulePath)
+	addBackgroundFlags(cmd, &opts.background, &opts.backgroundFile)
+	cmd.Flags().IntVar(&opts.maxGitProcs, "max-git-procs", 16, "max concurrent git subprocesses")
+	cmd.Flags().StringVarP(&opts.format, "format", "f", "text", "output format: text or json (sarif is not supported by delegate mode)")
+	cmd.RegisterFlagCompletionFunc("format", completeEnum("text", "json"))
+}

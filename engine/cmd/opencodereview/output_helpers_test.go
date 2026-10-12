@@ -1,0 +1,806 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/alibaba/open-code-review/internal/agent"
+	"github.com/alibaba/open-code-review/internal/llmloop"
+	"github.com/alibaba/open-code-review/internal/model"
+)
+
+func TestHasSubtaskErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		warnings []agent.AgentWarning
+		want     bool
+	}{
+		{"nil warnings", nil, false},
+		{"empty", []agent.AgentWarning{}, false},
+		{"no subtask errors", []agent.AgentWarning{{Type: "other", Message: "msg"}}, false},
+		{"has subtask error", []agent.AgentWarning{{Type: "subtask_error", Message: "fail"}}, true},
+		{"has scan subtask error", []agent.AgentWarning{{Type: "scan_subtask_error", Message: "fail"}}, true},
+		{"mixed", []agent.AgentWarning{{Type: "warn"}, {Type: "subtask_error"}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasSubtaskErrors(tc.warnings)
+			if got != tc.want {
+				t.Errorf("hasSubtaskErrors() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWrapByRunes(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		maxW  int
+		lines int
+	}{
+		{"empty", "", 80, 0},
+		{"short line", "hello", 80, 1},
+		{"exact width", strings.Repeat("a", 10), 10, 1},
+		{"wraps long line", strings.Repeat("word ", 25), 20, 7},
+		{"respects newlines", "line1\nline2\nline3", 80, 3},
+		{"wrap with newlines", "short\n" + strings.Repeat("x", 50), 20, 4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapByRunes(tc.text, tc.maxW)
+			if len(got) != tc.lines {
+				t.Errorf("wrapByRunes() got %d lines, want %d\nlines: %v", len(got), tc.lines, got)
+			}
+		})
+	}
+}
+
+func TestWrapSingleRuneLine(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		maxW int
+		min  int
+	}{
+		{"short line unchanged", "hello", 100, 1},
+		{"wraps at space", "hello world foo bar baz", 12, 2},
+		{"no space to wrap", strings.Repeat("x", 30), 10, 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapSingleRuneLine(tc.line, tc.maxW)
+			if len(got) < tc.min {
+				t.Errorf("got %d lines, want at least %d", len(got), tc.min)
+			}
+		})
+	}
+}
+
+func TestRuneWrapCut(t *testing.T) {
+	// Short line returns full length
+	runes := []rune("short")
+	cut := runeWrapCut(runes, 100)
+	if cut != len(runes) {
+		t.Errorf("expected %d, got %d", len(runes), cut)
+	}
+
+	// Cuts at space
+	runes = []rune("hello world test")
+	cut = runeWrapCut(runes, 11)
+	if runes[cut] != ' ' && cut != 11 {
+		t.Errorf("expected cut at space boundary, got %d (char=%c)", cut, runes[cut])
+	}
+}
+
+func TestVisibleRunesLen(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"hello", 5},
+		{"", 0},
+		{"\x01\x02\x03", 0},
+		{"a\x01b", 2},
+		{"\x7f", 0},
+	}
+	for _, tc := range tests {
+		got := visibleRunesLen([]rune(tc.input))
+		if got != tc.want {
+			t.Errorf("visibleRunesLen(%q) = %d, want %d", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestSplitToLines(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"a\nb\nc", 3},
+		{"a\nb\nc\n", 3},
+		{"single", 1},
+		{"crlf\r\nline", 2},
+		{"", 0},
+	}
+	for _, tc := range tests {
+		got := splitToLines(tc.input)
+		if len(got) != tc.want {
+			t.Errorf("splitToLines(%q) = %d lines, want %d", tc.input, len(got), tc.want)
+		}
+	}
+}
+
+func TestBuildDiffLines(t *testing.T) {
+	t.Run("empty suggestion returns nil", func(t *testing.T) {
+		c := model.LlmComment{ExistingCode: "old", SuggestionCode: ""}
+		got := buildDiffLines(c)
+		if got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("empty existing returns nil", func(t *testing.T) {
+		c := model.LlmComment{ExistingCode: "", SuggestionCode: "new"}
+		got := buildDiffLines(c)
+		if got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("diff computed", func(t *testing.T) {
+		c := model.LlmComment{
+			ExistingCode:   "line1\nline2\n",
+			SuggestionCode: "line1\nmodified\n",
+		}
+		got := buildDiffLines(c)
+		if len(got) == 0 {
+			t.Error("expected non-empty diff lines")
+		}
+	})
+}
+
+func TestOutputJSONWithWarnings_NoCommentsSubtaskError(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	warnings := []agent.AgentWarning{{Type: "subtask_error", File: "x.go", Message: "fail"}}
+	err := outputJSONWithWarnings(nil, warnings, 1, 10, 5, 15, 0, 0, time.Second, "", nil, nil, "abc123trace", nil, "", nil, false, nil, os.Stdout, nil, nil)
+	_ = w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	var out jsonOutput
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Status != "completed_with_errors" {
+		t.Errorf("status = %q, want completed_with_errors", out.Status)
+	}
+	if !strings.Contains(out.Message, "errors") {
+		t.Errorf("message = %q, expected to mention errors", out.Message)
+	}
+	if out.TraceID != "abc123trace" {
+		t.Errorf("trace_id = %q, want abc123trace", out.TraceID)
+	}
+}
+
+func TestStatusBadge(t *testing.T) {
+	tests := []struct {
+		status string
+		substr string
+	}{
+		{"added", "[A]"},
+		{"modified", "[M]"},
+		{"deleted", "[D]"},
+		{"renamed", "[R]"},
+		{"binary", "[B]"},
+		{"scan", "[S]"},
+		{"unknown", "[?]"},
+	}
+	for _, tc := range tests {
+		got := statusBadge(tc.status)
+		if !strings.Contains(got, tc.substr) {
+			t.Errorf("statusBadge(%q) = %q, expected to contain %q", tc.status, got, tc.substr)
+		}
+	}
+}
+
+func TestOutputJSON(t *testing.T) {
+	// Redirect stdout to capture output
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	comments := []model.LlmComment{
+		{Path: "a.go", Content: "fix bug", StartLine: 1, EndLine: 5},
+	}
+	err := outputJSON(comments)
+
+	_ = w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("outputJSON error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	var out jsonOutput
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if out.Status != "success" {
+		t.Errorf("status = %q, want success", out.Status)
+	}
+	if len(out.Comments) != 1 {
+		t.Errorf("expected 1 comment, got %d", len(out.Comments))
+	}
+}
+
+func TestOutputJSON_NoComments(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := outputJSON(nil)
+
+	_ = w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("outputJSON error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	var out jsonOutput
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Message == "" {
+		t.Error("expected non-empty message when no comments")
+	}
+}
+
+func TestOutputJSONWithWarnings(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	comments := []model.LlmComment{{Path: "b.go", Content: "test"}}
+	warnings := []agent.AgentWarning{{Type: "subtask_error", File: "c.go", Message: "failed"}}
+	failures := []llmloop.ToolFailureDetail{{
+		ToolCallNumber: 2,
+		ToolName:       "file_read",
+		FilePath:       "b.go",
+		Arguments:      `{"path":"missing.go"}`,
+		Error:          "file not found",
+	}}
+	err := outputJSONWithWarnings(comments, warnings, 5, 100, 50, 150, 10, 5, 3*time.Second, "summary", map[string]int64{"file_read": 3}, failures, "trace-xyz-789", nil, "", nil, false, nil, os.Stdout, nil, nil)
+	_ = w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	if !bytes.Contains(buf.Bytes(), []byte(`"failure"`)) {
+		t.Fatalf("tool_calls must use the failure field: %s", buf.String())
+	}
+	if bytes.Contains(buf.Bytes(), []byte(`"failure_count"`)) {
+		t.Fatalf("tool_calls must not emit the legacy failure_count field: %s", buf.String())
+	}
+
+	var out jsonOutput
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Status != "completed_with_errors" {
+		t.Errorf("status = %q, want completed_with_errors", out.Status)
+	}
+	if out.Summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if out.Summary.FilesReviewed != 5 {
+		t.Errorf("FilesReviewed = %d, want 5", out.Summary.FilesReviewed)
+	}
+	if out.ToolCalls == nil || out.ToolCalls.Total != 3 {
+		t.Errorf("ToolCalls.Total = %v", out.ToolCalls)
+	}
+	if out.ToolCalls.Failure != 1 || len(out.ToolCalls.FailureDetails) != 1 {
+		t.Fatalf("ToolCalls failures = %+v", out.ToolCalls)
+	}
+	if out.ToolCalls.FailureByTool["file_read"] != 1 {
+		t.Errorf("failure_by_tool = %+v, want file_read=1", out.ToolCalls.FailureByTool)
+	}
+	failure := out.ToolCalls.FailureDetails[0]
+	if failure.ToolCallNumber != 2 || failure.ToolName != "file_read" || failure.FilePath != "b.go" ||
+		failure.Arguments != `{"path":"missing.go"}` || failure.Error != "file not found" {
+		t.Errorf("failure detail = %+v", failure)
+	}
+	if out.TraceID != "trace-xyz-789" {
+		t.Errorf("trace_id = %q, want trace-xyz-789", out.TraceID)
+	}
+}
+
+func TestOutputJSONWithWarnings_NoCommentsNoErrors(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	warnings := []agent.AgentWarning{{Type: "warning", Message: "something"}}
+	err := outputJSONWithWarnings(nil, warnings, 2, 50, 20, 70, 0, 0, time.Second, "", nil, nil, "", nil, "", nil, false, nil, os.Stdout, nil, nil)
+	_ = w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	var out jsonOutput
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Status != "completed_with_warnings" {
+		t.Errorf("status = %q, want completed_with_warnings", out.Status)
+	}
+	if out.Message == "" {
+		t.Error("expected non-empty message")
+	}
+}
+
+func TestOutputJSONNoFiles(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	identity := &jsonLLMIdentity{Provider: "anthropic", Model: "claude-opus-4-6"}
+	err := outputJSONNoFiles("test-trace-id-456", identity, os.Stdout)
+
+	_ = w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	var out jsonOutput
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Status != "skipped" {
+		t.Errorf("status = %q, want skipped", out.Status)
+	}
+	if out.TraceID != "test-trace-id-456" {
+		t.Errorf("trace_id = %q, want test-trace-id-456", out.TraceID)
+	}
+	if out.LLM == nil || out.LLM.Provider != "anthropic" || out.LLM.Model != "claude-opus-4-6" {
+		t.Fatalf("llm = %+v", out.LLM)
+	}
+	if out.ToolCalls == nil || out.ToolCalls.Failure != 0 || out.ToolCalls.FailureByTool == nil || len(out.ToolCalls.FailureByTool) != 0 || out.ToolCalls.FailureDetails == nil || len(out.ToolCalls.FailureDetails) != 0 {
+		t.Errorf("empty tool failure fields = %+v", out.ToolCalls)
+	}
+}
+
+func TestNewJSONToolCalls_FailureByTool(t *testing.T) {
+	failures := []llmloop.ToolFailureDetail{
+		{ToolName: "code_search", Arguments: `{"search_text":"needle"}`},
+		{ToolName: "file_read"},
+		{ToolName: "file_read"},
+		{ToolName: "file_find"},
+		{ToolName: "file_find"},
+		{ToolName: "file_find"},
+	}
+
+	got := newJSONToolCalls(nil, failures)
+	if got.Failure != 6 {
+		t.Fatalf("failure = %d, want 6", got.Failure)
+	}
+	if got.FailureByTool["code_search"] != 1 || got.FailureByTool["file_read"] != 2 || got.FailureByTool["file_find"] != 3 {
+		t.Errorf("failure_by_tool = %+v, want code_search=1 file_read=2 file_find=3", got.FailureByTool)
+	}
+	if got.FailureDetails[0].Arguments != `{"search_text":"needle"}` {
+		t.Errorf("failure arguments = %q, want preserved detail arguments", got.FailureDetails[0].Arguments)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	// Drain while fn runs. Reading only after fn returns caps the capture at
+	// whatever the pipe buffer holds: 64 KiB on Linux, far less on a Windows
+	// anonymous pipe, and a payload past that blocks the writer forever.
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = buf.ReadFrom(r)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	<-done
+	_ = r.Close()
+	return buf.String()
+}
+
+// captureStderr captures everything written to os.Stderr during fn. Mirrors
+// captureStdout; used to assert structured usage emitted on the failure path.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	// Drained concurrently for the same reason as captureStdout: an undrained
+	// pipe deadlocks fn once its output exceeds the OS pipe buffer.
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = buf.ReadFrom(r)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stderr = old
+	<-done
+	_ = r.Close()
+	return buf.String()
+}
+
+func TestOutputText_NoComments(t *testing.T) {
+	got := captureStdout(t, func() {
+		outputText(nil)
+	})
+	if !strings.Contains(got, "Looks good to me") {
+		t.Errorf("expected 'Looks good to me', got %q", got)
+	}
+}
+
+func TestOutputText_WithComments(t *testing.T) {
+	comments := []model.LlmComment{
+		{Path: "main.go", StartLine: 10, EndLine: 15, Content: "potential nil dereference"},
+	}
+	got := captureStdout(t, func() {
+		outputText(comments)
+	})
+	if !strings.Contains(got, "main.go") {
+		t.Errorf("expected path in output, got %q", got)
+	}
+	if !strings.Contains(got, "potential nil dereference") {
+		t.Errorf("expected comment content in output, got %q", got)
+	}
+}
+
+func TestOutputTextWithWarnings_NoCommentsNoErrors(t *testing.T) {
+	warnings := []agent.AgentWarning{{Type: "warning", File: "x.go", Message: "slow"}}
+	got := captureStdout(t, func() {
+		outputTextWithWarnings(nil, warnings, nil, os.Stdout)
+	})
+	if !strings.Contains(got, "Looks good to me") {
+		t.Errorf("expected 'Looks good to me', got %q", got)
+	}
+}
+
+func TestOutputTextWithWarnings_NoCommentsWithSubtaskError(t *testing.T) {
+	warnings := []agent.AgentWarning{{Type: "subtask_error", File: "y.go", Message: "failed"}}
+	got := captureStdout(t, func() {
+		outputTextWithWarnings(nil, warnings, nil, os.Stdout)
+	})
+	if !strings.Contains(got, "could not be reviewed") {
+		t.Errorf("expected subtask error message, got %q", got)
+	}
+}
+
+func TestOutputTextWithWarnings_WithComments(t *testing.T) {
+	comments := []model.LlmComment{
+		{Path: "a.go", StartLine: 1, EndLine: 3, Content: "fix this"},
+	}
+	warnings := []agent.AgentWarning{{Type: "info", File: "b.go", Message: "note"}}
+	got := captureStdout(t, func() {
+		outputTextWithWarnings(comments, warnings, nil, os.Stdout)
+	})
+	if !strings.Contains(got, "a.go") {
+		t.Errorf("expected comment path, got %q", got)
+	}
+	if !strings.Contains(got, "fix this") {
+		t.Errorf("expected comment content, got %q", got)
+	}
+}
+
+func TestRenderComment_EmptyContentNoDiff(t *testing.T) {
+	got := captureStdout(t, func() {
+		renderComment(model.LlmComment{Path: "skip.go", StartLine: 1, EndLine: 1, Content: "", ExistingCode: "", SuggestionCode: ""}, os.Stdout)
+	})
+	if got != "" {
+		t.Errorf("expected empty output for empty comment, got %q", got)
+	}
+}
+
+func TestRenderComment_ContentOnly(t *testing.T) {
+	got := captureStdout(t, func() {
+		renderComment(model.LlmComment{Path: "file.go", StartLine: 5, EndLine: 10, Content: "consider renaming"}, os.Stdout)
+	})
+	if !strings.Contains(got, "file.go:5-10") {
+		t.Errorf("expected path:line range, got %q", got)
+	}
+	if !strings.Contains(got, "consider renaming") {
+		t.Errorf("expected content, got %q", got)
+	}
+}
+
+func TestRenderComment_WithDiff(t *testing.T) {
+	got := captureStdout(t, func() {
+		renderComment(model.LlmComment{
+			Path:           "diff.go",
+			StartLine:      1,
+			EndLine:        2,
+			Content:        "rename var",
+			ExistingCode:   "old := 1\n",
+			SuggestionCode: "new := 1\n",
+		}, os.Stdout)
+	})
+	if !strings.Contains(got, "diff.go:1-2") {
+		t.Errorf("expected path:line range, got %q", got)
+	}
+	if !strings.Contains(got, "rename var") {
+		t.Errorf("expected content, got %q", got)
+	}
+}
+
+func TestPrintDiffLine(t *testing.T) {
+	tests := []struct {
+		name    string
+		prefix  string
+		content string
+	}{
+		{"added", "+", "new line"},
+		{"deleted", "-", "old line"},
+		{"context", " ", "context line"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := captureStdout(t, func() {
+				printDiffLine(os.Stdout, tc.prefix, tc.content, "\033[92m", "\033[48;2;0;60;0m")
+			})
+			if !strings.Contains(got, tc.prefix) {
+				t.Errorf("expected prefix %q in output, got %q", tc.prefix, got)
+			}
+			if !strings.Contains(got, tc.content) {
+				t.Errorf("expected content %q in output, got %q", tc.content, got)
+			}
+		})
+	}
+}
+
+func TestOutputPreviewText_NoFiles(t *testing.T) {
+	p := &agent.DiffPreview{TotalFiles: 0}
+	got := captureStdout(t, func() {
+		outputPreviewText(p, os.Stdout)
+	})
+	if !strings.Contains(got, "No files changed") {
+		t.Errorf("expected 'No files changed', got %q", got)
+	}
+}
+
+func TestOutputPreviewText_WithReviewableFiles(t *testing.T) {
+	p := &agent.DiffPreview{
+		Entries: []agent.DiffPreviewEntry{
+			{Path: "main.go", Status: "modified", Insertions: 10, Deletions: 3, WillReview: true},
+			{Path: "util.go", Status: "added", Insertions: 20, Deletions: 0, WillReview: true},
+		},
+		TotalInsertions: 30,
+		TotalDeletions:  3,
+		TotalFiles:      2,
+		ReviewableCount: 2,
+		ExcludedCount:   0,
+	}
+	got := captureStdout(t, func() {
+		outputPreviewText(p, os.Stdout)
+	})
+	if !strings.Contains(got, "2 file(s) changed") {
+		t.Errorf("expected file count, got %q", got)
+	}
+	if !strings.Contains(got, "Will review (2)") {
+		t.Errorf("expected 'Will review' section, got %q", got)
+	}
+	if !strings.Contains(got, "main.go") || !strings.Contains(got, "util.go") {
+		t.Errorf("expected file paths, got %q", got)
+	}
+}
+
+func TestOutputPreviewText_WithExcludedFiles(t *testing.T) {
+	p := &agent.DiffPreview{
+		Entries: []agent.DiffPreviewEntry{
+			{Path: "src.go", Status: "modified", Insertions: 5, Deletions: 1, WillReview: true},
+			{Path: "vendor/lib.go", Status: "added", Insertions: 100, Deletions: 0, WillReview: false, ExcludeReason: model.ExcludeProviderDirectory},
+		},
+		TotalInsertions: 105,
+		TotalDeletions:  1,
+		TotalFiles:      2,
+		ReviewableCount: 1,
+		ExcludedCount:   1,
+	}
+	got := captureStdout(t, func() {
+		outputPreviewText(p, os.Stdout)
+	})
+	if !strings.Contains(got, "Will review (1)") {
+		t.Errorf("expected 'Will review (1)', got %q", got)
+	}
+	if !strings.Contains(got, "Excluded from review (1)") {
+		t.Errorf("expected 'Excluded from review (1)', got %q", got)
+	}
+	if !strings.Contains(got, "1 file(s) in provider directories (vendor/)") {
+		t.Errorf("expected provider-directory summary line, got %q", got)
+	}
+	if !strings.Contains(got, "not reviewable") {
+		t.Errorf("expected exclude reason, got %q", got)
+	}
+}
+
+// TestOutputPreviewText_ExcludedPathDoesNotWidenWillReview pins issue #1236:
+// a long excluded path must not pad the Will review rows, or the counts are
+// pushed off a normal-width terminal.
+func TestOutputPreviewText_ExcludedPathDoesNotWidenWillReview(t *testing.T) {
+	setColor(t, false)
+	reviewable := agent.DiffPreviewEntry{Path: "demo_real.go", Status: "added", Insertions: 3, WillReview: true}
+	render := func(entries ...agent.DiffPreviewEntry) string {
+		p := &agent.DiffPreview{Entries: entries, TotalFiles: len(entries), ReviewableCount: 1, ExcludedCount: len(entries) - 1}
+		out := captureStdout(t, func() { outputPreviewText(p, os.Stdout) })
+		for _, ln := range strings.Split(out, "\n") {
+			if strings.Contains(ln, reviewable.Path) {
+				return ln
+			}
+		}
+		t.Fatalf("no row for %s in:\n%s", reviewable.Path, out)
+		return ""
+	}
+
+	alone := render(reviewable)
+	withLong := render(reviewable,
+		agent.DiffPreviewEntry{
+			Path:          "internal/some/deeply/nested/directory/structure/that/is/long/file_test.go",
+			Status:        "modified",
+			ExcludeReason: model.ExcludeDefaultPath,
+		},
+		agent.DiffPreviewEntry{
+			Path:          "target/.pnpm/@scope+some-package@1.2.3/packages/some-package/esm/internal/index.js",
+			Status:        "added",
+			ExcludeReason: model.ExcludeProviderDirectory,
+		},
+	)
+	if withLong != alone {
+		t.Errorf("Will review row changed by an excluded path:\n got  %q\n want %q", withLong, alone)
+	}
+}
+
+// TestOutputPreviewText_AggregatesProviderDirectories pins issue #1236: a
+// vendored tree can hold thousands of files nobody can act on, so the terminal
+// collapses them into one line naming the matched directories. Other exclude
+// reasons still print per row.
+func TestOutputPreviewText_AggregatesProviderDirectories(t *testing.T) {
+	setColor(t, false)
+	longVendored := "target/.pnpm/@scope+some-package@1.2.3/packages/some-package/esm/internal/index.js"
+	p := &agent.DiffPreview{
+		Entries: []agent.DiffPreviewEntry{
+			{Path: longVendored, Status: "added", ExcludeReason: model.ExcludeProviderDirectory},
+			{Path: "demo_real.go", Status: "added", Insertions: 3, WillReview: true},
+			{Path: "target/demo.go", Status: "added", ExcludeReason: model.ExcludeProviderDirectory},
+			{Path: "internal/diff/git_test.go", Status: "modified", ExcludeReason: model.ExcludeDefaultPath},
+			{Path: "vendor/a.go", Status: "modified", ExcludeReason: model.ExcludeProviderDirectory},
+			{Path: "assets/logo.png", Status: "binary", ExcludeReason: model.ExcludeBinary},
+		},
+		TotalFiles:      6,
+		ReviewableCount: 1,
+		ExcludedCount:   5,
+	}
+	got := captureStdout(t, func() { outputPreviewText(p, os.Stdout) })
+
+	for _, want := range []string{
+		"Excluded from review (5):",
+		"  [M]  internal/diff/git_test.go (default_path)",
+		"assets/logo.png",
+		"(binary)",
+		"  3 file(s) in provider directories (target/, vendor/)",
+		"not reviewable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("preview missing %q:\n%s", want, got)
+		}
+	}
+	for _, path := range []string{longVendored, "target/demo.go", "vendor/a.go"} {
+		if strings.Contains(got, path) {
+			t.Errorf("provider-directory path %q listed per row:\n%s", path, got)
+		}
+	}
+	for _, dir := range []string{"node_modules/", ".idea/", "pkgs/"} {
+		if strings.Contains(got, dir) {
+			t.Errorf("unmatched provider directory %q named in summary:\n%s", dir, got)
+		}
+	}
+}
+
+// TestOutputPreviewJSON_KeepsEveryFileInEntryOrder pins that --format json
+// dumps every entry (including provider_directory) in Preview.Entries order.
+func TestOutputPreviewJSON_KeepsEveryFileInEntryOrder(t *testing.T) {
+	p := &agent.DiffPreview{
+		Entries: []agent.DiffPreviewEntry{
+			{Path: "a.go", Status: "modified", WillReview: true, Insertions: 1},
+			{Path: "target/mid.go", Status: "modified", ExcludeReason: model.ExcludeProviderDirectory},
+			{Path: "z.go", Status: "modified", WillReview: true, Insertions: 1},
+			{Path: "vendor/lib.go", Status: "added", ExcludeReason: model.ExcludeProviderDirectory},
+		},
+		TotalFiles:      4,
+		ReviewableCount: 2,
+		ExcludedCount:   2,
+	}
+	var buf bytes.Buffer
+	if err := outputPreviewJSON(p, &buf); err != nil {
+		t.Fatalf("outputPreviewJSON: %v", err)
+	}
+	got := decodeSinglePreviewJSON(t, buf.String())
+	want := []string{"a.go", "target/mid.go", "z.go", "vendor/lib.go"}
+	if len(got.Entries) != len(want) {
+		t.Fatalf("files = %d, want %d: %+v", len(got.Entries), len(want), got.Entries)
+	}
+	for i, path := range want {
+		if got.Entries[i].Path != path {
+			t.Errorf("files[%d].path = %q, want %q", i, got.Entries[i].Path, path)
+		}
+	}
+	if got.Entries[1].ExcludeReason != model.ExcludeProviderDirectory || got.Entries[3].ExcludeReason != model.ExcludeProviderDirectory {
+		t.Errorf("provider_directory reasons lost in JSON: %+v", got.Entries)
+	}
+}
+
+// decodeSinglePreviewJSON asserts that s is exactly one JSON value followed
+// only by the encoder's trailing newline. Automation consuming --format json
+// relies on this: a stray banner or progress line on stdout would break it.
+func decodeSinglePreviewJSON(t *testing.T, s string) model.Preview {
+	t.Helper()
+	if strings.ContainsRune(s, '\x1b') {
+		t.Errorf("stdout contains an ANSI escape:\n%q", s)
+	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	var got model.Preview
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("decode preview JSON: %v\nstdout was:\n%q", err, s)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		t.Errorf("expected EOF after the first JSON value, got err=%v\nstdout was:\n%q", err, s)
+	}
+	return got
+}
