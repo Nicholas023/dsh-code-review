@@ -82,7 +82,7 @@ async function reviewOnce(ctx, getConfig, args) {
   if (endpoint && endpoint.keyEnv) {
     const key = await resolveApiKey(ctx, endpoint.keyEnv);
     if (isKeyMissing(key)) {
-      injectNote = `\n> ⚠ 评审模型 ${endpoint.providerLabel} 的凭据（${endpoint.keyEnv}）未找到：请配置环境变量或在 \`~/.dsh/.credentials.yaml\` 中登记后再审。`;
+      injectNote = `\n> ⚠ 评审模型 ${endpoint.providerLabel} 的凭据（${endpoint.keyEnv}）未找到：请配置环境变量或在 DSH 凭据文件中登记后再审。`;
     } else {
       const prep = prepareEngineEnv({ endpoint, key, timeoutMs: cfg.review_timeout_ms });
       engineEnv = prep.env;

@@ -1,15 +1,15 @@
 /**
  * scripts/switch-model-e2e.mjs —— 判据⑤「切模型也通」实证：
- * 设置面板另选 （异构审查，DSH  cucc provider）后，
- * 插件管道真实评审跑通。
+ * 设置面板另选「非会话模型」（异构审查）后，插件管道真实评审跑通。
  *
- * 与 plugin-e2e-smoke 的 session 链路互补：这里显式 resolveProvider('REVIEW_MODEL_A')，
+ * 与 plugin-e2e-smoke 的 session 链路互补：这里显式 resolveProvider(<模型id>)，
  * 证明「选定 ≠ session」路径的端点解析 → key 解析 → env 注入 → 引擎评审
- * 全链路可用； 带 thinkingFormat=chat-template（vLLM 兼容端点），
+ * 全链路可用；若目标模型带 thinkingFormat=chat-template（vLLM 兼容端点），
  * extraBody 处理也一并走插件逻辑。
  *
- * 用法：node scripts/switch-model-e2e.mjs [模型id]（默认 ；真实 API，
- * 约 10-40s / 数千 token）。
+ * 模型 id 以本机 DSH 配置为准（即设置面板「评审模型」选择器里的选项）。
+ * 用法：node scripts/switch-model-e2e.mjs [模型id]（默认取本机常用验证模型；
+ * 真实 API，约 10-40s / 数千 token）。
  */
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +20,7 @@ import { createModelSource } from '../src/model-provider.js';
 import { resolveApiKey, isKeyMissing } from '../src/credentials.js';
 import { prepareEngineEnv, runEngine } from '../src/runner.js';
 
+// 默认验证目标：本机 DSH 配置中存在的非会话模型（可按需以命令行参数覆盖）。
 const TARGET = process.argv[2] ?? 'REVIEW_MODEL_A';
 const BIN = fileURLToPath(new URL('../bin/codecheck.exe', import.meta.url));
 let failures = 0;

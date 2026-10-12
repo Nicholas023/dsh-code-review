@@ -8,7 +8,7 @@
  *   3. 静态兜底（仅 DeepSeek 官方公开端点与公开模型名，零敏感）。
  *
  * 零敏感原则：
- *   - 不硬编码任何特定平台（等一律从 DSH 配置动态读入，用户自己配的）；
+ *   - 不硬编码任何特定平台（一切平台/模型信息从 DSH 配置动态读入，用户自己配的）；
  *   - 静态兜底只含 api.deepseek.com + deepseek-flash/deepseek-v4-pro（官方公开信息）；
  *   - key 只返回「引用名」（apiKeyEnv），真实值由 src/credentials.js 解析，绝不落盘。
  *
