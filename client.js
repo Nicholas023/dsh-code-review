@@ -102,6 +102,20 @@ window.__ModuleLoader__.load({
       .dcr-btn.primary { background: color-mix(in srgb, currentColor 14%, transparent); border-color: currentColor; }
       .dcr-btn.danger { border-color: color-mix(in srgb, #d33 55%, transparent); color: #d33; }
       .dcr-status { font-size: 12px; opacity: .62; margin-left: auto; }
+      /* 任务卡（第二层：GUI 实时刷新） */
+      .dcr-tasks { margin-top: 14px; border-top: 1px solid color-mix(in srgb, currentColor 13%, transparent); padding-top: 10px; }
+      .dcr-task { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 5px 0;
+        border-bottom: 1px dashed color-mix(in srgb, currentColor 10%, transparent); }
+      .dcr-task:last-child { border-bottom: none; }
+      .dcr-task-icon { flex: 0 0 auto; width: 18px; text-align: center; }
+      .dcr-task-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+      .dcr-task-id { font-family: ui-monospace, Consolas, monospace; font-size: 12px; opacity: .85; }
+      .dcr-task-repo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; opacity: .62; }
+      .dcr-task-meta { margin-left: auto; flex: 0 0 auto; font-size: 12px; opacity: .72; text-align: right; }
+      .dcr-task.done .dcr-task-icon { color: #2e8b57; }
+      .dcr-task.failed .dcr-task-icon { color: #d33; }
+      .dcr-em { color: #2e8b57; font-weight: 600; }
+      .dcr-warn { color: #d33; }
     `;
 
     /* ─────────────── 表单逻辑（照 宿主范式姿势精简） ─────────────── */
@@ -320,6 +334,101 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /* ─────────────── 任务卡（2026-10-13 第二层：GUI 实时刷新） ─────────────── */
+
+    /** 任务状态图标与文案（与 src/task-api.js 的列表摘要字段一一对应）。 */
+    const TASK_ICON = { queued: '🕐', running: '⏳', done: '✅', failed: '❌' };
+    const TASK_TEXT = { queued: '排队中', running: '评审中', done: '已完成', failed: '失败' };
+
+    /** 任务耗时人类化（elapsedSec 为秒）。 */
+    function fmtElapsed(sec) {
+      if (sec === null || sec === undefined) return '';
+      if (sec >= 60) return (sec / 60).toFixed(1) + ' 分钟';
+      return Math.round(sec) + 's';
+    }
+
+    /** 仓库路径 → 展示名（取末端一段）。 */
+    function repoName(p) {
+      const parts = String(p || '').split(/[\\/]/).filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : '(默认目录)';
+    }
+
+    /**
+     * 后台评审任务卡：轮询宿主路由 /api/code-review/tasks（5s 一次，
+     * 相对路径 fetch 走宿主认证通道，同源可用）。发起评审即见任务行，
+     * 完成/失败自动翻身为 ✅/❌ + 报告落盘提示——「GUI 里能看到后台任务」。
+     * 路由不可用（宿主未提供 webServer / 插件页外环境）→ 静默降级一行提示。
+     */
+    function TasksCard() {
+      const [tasks, setTasks] = React.useState(null); // null = 尚未加载/加载失败
+      const [loaded, setLoaded] = React.useState(false);
+      React.useEffect(() => {
+        let alive = true;
+        let timer = null;
+        const load = async () => {
+          try {
+            const res = await window.fetch('/api/code-review/tasks', { headers: { accept: 'application/json' } });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const body = await res.json();
+            if (!alive) return;
+            setTasks(Array.isArray(body.tasks) ? body.tasks.slice(0, 5) : []);
+            setLoaded(true);
+          } catch (error) {
+            if (!alive) return;
+            // 静默降级：路由未挂载/网络不可用——任务卡显示不可用，不打扰设置卡。
+            setLoaded(true);
+            setTasks((prev) => (Array.isArray(prev) ? prev : []));
+            // 只记一次诊断（避免每 5s 重写相同状态）。错误细节不外露。
+          }
+        };
+        load();
+        timer = setInterval(load, 5000);
+        return () => { alive = false; if (timer) clearInterval(timer); };
+      }, []);
+
+      const rows = Array.isArray(tasks) ? tasks : [];
+      const latestDone = rows.find((t) => t.status === 'done');
+      const runningCount = rows.filter((t) => t.status === 'running').length;
+
+      return h('div', { className: 'dcr-card' },
+        h('style', null, STYLE),
+        h('div', { className: 'dcr-tasks' },
+          h('div', { className: 'dcr-row' },
+            h('span', { className: 'dcr-k' }, '后台任务'),
+            h('span', null, runningCount > 0 ? h('span', { className: 'dcr-em' }, '『 ' + runningCount + ' 个评审进行中，不阻塞前台，慢模型没关系』') : '无进行中的评审'),
+            h('span', { className: 'dcr-status' }, '5 秒自动刷新')
+          ),
+          loaded && rows.length === 0
+            ? h('p', { className: 'dcr-note' }, '还没有评审任务。会话里说「审一下 X」，或输入 /review。')
+            : rows.map((t) => {
+                const icon = TASK_ICON[t.status] || '•';
+                const text = TASK_TEXT[t.status] || t.status;
+                const shortId = String(t.id).slice(-8);
+                const when = (t.finishedAt || t.createdAt || '').slice(11, 19);
+                const meta =
+                  (text + (t.elapsedSec !== null && t.elapsedSec !== undefined ? ' · ' + fmtElapsed(t.elapsedSec) : ''))
+                  + (t.status === 'done' && t.reportPath ? ' · 报告已落盘' : '')
+                  + (t.status === 'failed' ? ' · 看 code_review_status' : '')
+                  + ' · ' + when;
+                return h('div', { key: t.id, className: 'dcr-task ' + (t.status === 'done' ? 'done' : t.status === 'failed' ? 'failed' : '') },
+                  h('span', { className: 'dcr-task-icon' }, icon),
+                  h('span', { className: 'dcr-task-main' },
+                    h('span', { className: 'dcr-task-id' }, shortId),
+                    h('span', { className: 'dcr-task-repo' }, repoName(t.repoPath))
+                  ),
+                  h('span', { className: 'dcr-task-meta' }, meta)
+                );
+              }),
+          latestDone
+            ? h('p', { className: 'dcr-desc' },
+                h('span', { className: 'dcr-em' }, '✅ 最近完成：' + repoName(latestDone.repoPath)),
+                ' 报告已留档（' + (latestDone.reportPath || '路径见会话') + '），结果全文用 code_review_status 查。'
+              )
+            : null
+        )
+      );
+    }
+
     return {
       /** 需要的宿主客户端服务（只做激活顺序，不 require 任何宿主 UI 包）。 */
       inject: ['slots', 'configForms'],
@@ -335,6 +444,14 @@ window.__ModuleLoader__.load({
           order: 30,
           label: () => '智能代码审查'
         }, (props) => h(SettingsCard, Object.assign({}, props, { form })))), 'dsh-code-review: settings card');
+        // 第二层：后台任务卡（页面可见的实时任务面板）。与设置卡同 slot 分开注册，
+        // id 不同即互不干扰；路由不可用时卡片内静默降级，不影响设置卡。
+        ctx.effect(() => ctx.slots.inject('plugins.item', () => ctx.slots.register({
+          name: 'plugins.item',
+          id: ENTRY_ID + '.tasks',
+          order: 31,
+          label: () => '代码审查任务'
+        }, (props) => h(TasksCard, props))), 'dsh-code-review: tasks card');
       }
     };
   }

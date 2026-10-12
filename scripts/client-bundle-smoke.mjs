@@ -85,7 +85,7 @@ check('inject 声明了 configForms（0.2.0 设置域服务）', Array.isArray(l
   (loaded.inject ?? []).join(',') || '(空)');
 
 /* ── ③ apply：假 slots + configForms 上下文 ── */
-let cardProps = null; // 捕获注册的卡片渲染函数
+let cards = []; // 捕获注册的全部卡片（设置卡 + 任务卡各自注册，id 区分）
 /** 假 configForms 表单：getSnapshot 返回「Host 就绪可写」快照；set/unset 记痕迹并返回 true。 */
 const fakeForm = {
   snapshot: { status: 'ready', mode: 'host', writable: true, revision: 0, value: {} },
@@ -100,7 +100,7 @@ const fakeCtx = {
   effect(cb, label) { cb(); return () => {}; },
   slots: {
     inject(slot, getter) { if (slot === 'plugins.item') getter(); return () => {}; },
-    register(meta, render) { cardProps = { meta, render }; return () => {}; },
+    register(meta, render) { cards.push({ meta, render }); return () => {}; },
   },
   configForms: { get(id) { return fakeForm; } },
 };
@@ -113,24 +113,41 @@ try {
 check('apply 执行不抛（slots + configForms 注册成功）', !applyError,
   applyError ? String(applyError?.message ?? applyError) : 'OK');
 check('configForms.get 收到了插件条目 id', true, 'fakeForm 被 get 命中（表单已注入卡片）');
-check('注册了 plugins.item 卡片', cardProps?.meta?.id === 'dsh-code-review',
-  cardProps ? `id=${cardProps.meta.id} label=${typeof cardProps.meta.label === 'function' ? cardProps.meta.label() : cardProps.meta.label}` : '(未注册)');
+/** 设置卡（id=插件条目）与任务卡（id=.tasks）分列断言；slots.register 多次调用互相独立。 */
+const settingsCard = cards.find((c) => c.meta.id === 'dsh-code-review');
+const tasksCard = cards.find((c) => c.meta.id === 'dsh-code-review.tasks');
+check('注册了 plugins.item 设置卡', Boolean(settingsCard),
+  settingsCard ? `id=${settingsCard.meta.id} label=${typeof settingsCard.meta.label === 'function' ? settingsCard.meta.label() : settingsCard.meta.label}` : '(未注册)');
+check('注册了 .tasks 任务卡（第二层 GUI 实时刷新）', Boolean(tasksCard),
+  tasksCard ? `id=${tasksCard.meta.id} order=${tasksCard.meta.order}` : '(未注册)');
 
 /* ── ④ 两种视图渲染不抛（form 随 props 注入） ── */
 let renderError = null;
 let renderSummary = null;
 let renderFull = null;
 try {
-  renderSummary = cardProps.render({ view: 'summary' });
-  renderFull = cardProps.render({ view: 'full', form: fakeForm });
+  renderSummary = settingsCard.render({ view: 'summary' });
+  renderFull = settingsCard.render({ view: 'full', form: fakeForm });
 } catch (error) {
   renderError = error;
 }
-check('卡片 summary/full 两种视图渲染不抛（React stub 契约）', !renderError,
+check('设置卡 summary/full 两种视图渲染不抛（React stub 契约）', !renderError,
   renderError ? String(renderError?.message ?? renderError) : 'OK');
 check('summary 视图产出非空', Boolean(renderSummary), 'OK');
 check('全卡渲染产出非空', Boolean(renderFull), 'OK');
 check('全卡含保存操作（保存按钮文案在产物中）', JSON.stringify(renderFull).includes('保存'),
+  'OK');
+/* 任务卡渲染：不抛 + 含任务面板标题（fetch 经 fake useEffect 触发，内部降级不炸）。 */
+let tasksRender = null;
+let tasksRenderError = null;
+try {
+  tasksRender = tasksCard.render({ view: 'full' });
+} catch (error) {
+  tasksRenderError = error;
+}
+check('任务卡渲染不抛（轮询降级路径安全）', !tasksRenderError && Boolean(tasksRender),
+  tasksRenderError ? String(tasksRenderError?.message ?? tasksRenderError) : 'OK');
+check('任务卡产物含「后台任务」标题', Boolean(tasksRender) && JSON.stringify(tasksRender).includes('后台任务'),
   'OK');
 
 /* ── ⑤ 界面字段 ≡ schema 键 双向一致性 ── */
