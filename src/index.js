@@ -29,6 +29,7 @@ import {
   REVIEW_HOME, TASKS_ROOT,
   enqueueTask, readTask, listTasks, ensureServe, newTaskId,
 } from './task-book.js';
+import { createTaskRoutes, startPushPoller } from './task-api.js';
 
 export const name = 'dsh-code-review';
 
@@ -79,11 +80,14 @@ function taskFromArgs(args, cfg) {
  *
  * @param {object} args 工具参数。
  * @param {object} cfg  归一化配置。
+ * @param {object} [opts] 附加元数据：{ requestor: { sessionId } }——发起会话标识，
+ *                        供「完成后推送给发起会话」使用（拿不到则为空，跳过推送）。
  * @returns {Promise<{ok: boolean, taskId: string, text: string, serveAlive: boolean, syncFallback?: string}>}
  *   serve 未能拉起时回退同步执行（syncFallback 带提示）。
  */
-async function dispatchReview(args, cfg) {
+async function dispatchReview(args, cfg, opts = {}) {
   const task = taskFromArgs(args, cfg);
+  if (opts.requestor) task.requestor = opts.requestor;
   const serve = await ensureServe();
   if (!serve.alive) {
     // serve 起不来（罕见：宿主禁子进程等）→ 回退同步执行，保证能用。
@@ -157,6 +161,20 @@ async function reviewOnce(ctx, getConfig, args) {
 /* ═══ 工具定义 ═══ */
 
 /**
+ * 从工具 execute 的 exec 上下文尽力提取发起会话标识（供「完成后推送给发起会话」）。
+ * 宿主 exec 结构未公开：多形态尽力探测；拿不到返回 null（不推送，任务仍完整留档、
+ * GUI 卡片仍可见——卡片跟随发起评审的那条消息，不依赖会话定向）。
+ *
+ * @param {*} exec 工具 execute 第二参数（宿主注入的执行上下文）。
+ * @returns {{sessionId: string}|null}
+ */
+function requestorOf(exec) {
+  if (!exec || typeof exec !== 'object') return null;
+  const sid = exec?.sessionId ?? exec?.session?.id ?? exec?.address?.sessionId ?? exec?.meta?.sessionId ?? exec?.session_id;
+  return sid ? { sessionId: String(sid) } : null;
+}
+
+/**
  * 创建原生工具 code_review。
  *
  * @param {object} ctx        Cordis 上下文（模型取数/凭据解析）。
@@ -227,7 +245,8 @@ export function createReviewTool(ctx, getConfig) {
     }),
     async execute(args, _exec) {
       const cfg = getConfig();
-      const result = await dispatchReview(args ?? {}, cfg);
+      const requestor = requestorOf(_exec);
+      const result = await dispatchReview(args ?? {}, cfg, requestor ? { requestor } : {});
       const text = result.syncFallback ? `${result.text}\n\n> ${result.syncFallback}` : result.text;
       return { ok: true, task_id: result.taskId, text };
     },
@@ -436,6 +455,8 @@ function registerCommand(ctx, getConfig) {
                 exclude_paths: exclude,
               },
               cfg,
+              // /review 由会话直接发起：argv.session 为宿主注入的会话对象（尽力取 id）。
+              argv?.session?.id ? { requestor: { sessionId: String(argv.session.id) } } : {},
             );
             const text = result.syncFallback ? `${result.text}\n\n> ${result.syncFallback}` : result.text;
             sctx.logger?.info?.(`[dsh-code-review] /review 已投递后台任务 ${result.taskId}。`);
@@ -461,8 +482,38 @@ function registerCommand(ctx, getConfig) {
 
 // 必需服务注入声明见第 35 行（export const inject = ['tools', 'settings']）：
 // tools = code_review 工具（核心入口）、settings = 设置面板，均为静态必需注入；
-// command（/review 命令）为可选增强 → registerCommand 内 ctx.inject 动态注入，
-// 缺 command 服务不阻塞挂载（工具仍为主力入口）。
+// command（/review 命令）与 webServer（GUI 任务数据路由/完成推送）为可选增强 →
+// 各自经 ctx.inject 动态注入，缺服务不阻塞挂载（工具仍为主力入口，会话内查询兜底）。
+
+/**
+ * 挂载后台任务的宿主可见面：
+ *   - webServer 路由（GUI 轮询/SSE 的数据源，client 认证 fetch 通道同源可读）；
+ *   - 完成推送协程（任务 done/failed 时给发起会话推结果摘要，信息主动进 GUI 消息流）。
+ * 两者都是可选能力：webServer 缺失 → 仅剩会话内查询；会话通道缺失 → 推送跳
+ * 过（任务 JSON 记 push 标记，防反复试探）。disposers 供 apply 卸载时统一释放。
+ *
+ * @param {object} ctx       Cordis 上下文。
+ * @param {Function[]} disposers 卸载函数收集数组（apply 返回时逐个调用）。
+ */
+function mountTaskApi(ctx, disposers) {
+  // ① 数据路由（host 侧有 webServer 才挂；挂载失败仅告警）。
+  try {
+    ctx.inject(['webServer'], (sctx) => {
+      try {
+        for (const route of createTaskRoutes()) {
+          disposers.push(sctx.webServer.register(route));
+        }
+        ctx.logger?.info?.('[dsh-code-review] 后台任务数据路由已挂载：/api/code-review/tasks、/api/code-review/events。');
+      } catch (error) {
+        ctx.logger?.warn?.(`[dsh-code-review] webServer 路由挂载失败（GUI 仅剩会话内查询）：${String(error?.message ?? error)}`);
+      }
+    });
+  } catch (error) {
+    ctx.logger?.warn?.(`[dsh-code-review] webServer 服务不可用（GUI 数据路由跳过）：${String(error?.message ?? error)}`);
+  }
+  // ② 完成推送协程（每 5s 扫一次任务簿，轻量；无新任务几乎零开销）。
+  disposers.push(startPushPoller(ctx));
+}
 
 /**
  * Cordis apply 入口。
@@ -517,6 +568,9 @@ export function apply(ctx, configRaw) {
 
   // 斜杠命令 /review。
   registerCommand(ctx, getConfig);
+
+  // 后台任务宿主可见面（GUI 数据路由 + 完成推送；可选能力，缺服务不阻塞）。
+  mountTaskApi(ctx, disposers);
 
   // 引擎可用性探测（后台异步，仅日志告知；不阻塞挂载）。
   probeEngineVersion(getConfig()).then((v) => {

@@ -98,6 +98,10 @@ export function enqueueTask(fields) {
     focus: fields.focus ?? null,
     excludePaths: Array.isArray(fields.excludePaths) ? fields.excludePaths.map(String) : [],
     pendingPaths: Array.isArray(fields.pendingPaths) ? fields.pendingPaths.map(String) : [],
+    requestor:
+      fields.requestor && typeof fields.requestor === 'object' && fields.requestor.sessionId
+        ? { sessionId: String(fields.requestor.sessionId) }
+        : null,
     config: fields.config && typeof fields.config === 'object' ? { ...fields.config } : {},
     createdAt: new Date().toISOString(),
     startedAt: null,

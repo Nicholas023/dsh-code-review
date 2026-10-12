@@ -29,9 +29,12 @@ function check(label, ok, detail = '') {
   if (!ok) failures += 1;
 }
 
-/* ---------- 0. 隔离 DSH_HOME（必须在 import 前设置） ---------- */
+/* ---------- 0. 隔离 DSH_HOME + 任务簿（必须在 import 前设置） ---------- */
 const home = mkdtempSync(join(tmpdir(), 'dcr-cordis-smoke-'));
 process.env.DSH_HOME = home;
+// 任务簿目录（task-book 模块加载时锁定 TASKS_ROOT）：必须一并隔离，
+// 否则 apply 里的完成推送协程会指向生产任务簿（读并改写生产任务 JSON）。
+process.env.DSH_REVIEW_HOME = join(home, 'review');
 
 /* ---------- 1. 导入入口模块 ---------- */
 let mod;
