@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Yan-Zero/dsh-std/main/packages/manifest/schema/dsh-plugin-0.15.schema.json",
+  "manifestVersion": "0.15",
+  "id": "code-review.engine",
+  "name": "dsh-code-review",
+  "version": "0.1.0",
+  "facets": {
+    "host": {
+      "entry": "./std-facet.js",
+      "apiVersion": "v1alpha1"
+    }
+  },
+  "requires": {
+    "contracts": []
+  },
+  "permissions": [],
+  "contributes": {
+    "x-tools": [
+      {
+        "apiVersion": "tools.dsh/v1alpha1",
+        "kind": "Tool",
+        "id": "code-review.engine.review",
+        "name": "code_review",
+        "spec": {
+          "title": "智能代码审查",
+          "description": "对仓库 diff 或全目录扫描执行评审（安全脱敏 / 找 bug / 冗余与无关代码三视角），会话内返回问题清单并落一份报告文件留档。"
+        }
+      }
+    ]
+  },
+  "license": "Apache-2.0",
+  "source": {
+    "repository": "https://github.com/Nicholas023/dsh-code-review"
+  },
+  "compat": {
+    "hosts": ["dsh-desktop"]
+  }
+}
