@@ -15,11 +15,13 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
-const { buildReviewArgs, runEngine } = await import(new URL('../src/runner.js', import.meta.url).href);
+const { buildReviewArgs, runEngine, prepareEngineEnv } = await import(new URL('../src/runner.js', import.meta.url).href);
 const { isSensitivePath, listSensitiveFiles } = await import(new URL('../src/sensitive-list.js', import.meta.url).href);
 const { reportFilePath, repoNameOf } = await import(new URL('../src/report.js', import.meta.url).href);
 const { normalizeConfig, DEFAULT_CONFIG } = await import(new URL('../src/config.js', import.meta.url).href);
 const { createSettingsSchema } = await import(new URL('../src/settings-schema.js', import.meta.url).href);
+const { createModelSource, SESSION_MODEL, DEEPSEEK_OFFICIAL_DEFAULT } = await import(new URL('../src/model-provider.js', import.meta.url).href);
+const { parseCredentialsText } = await import(new URL('../src/credentials.js', import.meta.url).href);
 
 let n = 0;
 function t(label, fn) {
@@ -36,23 +38,25 @@ function t(label, fn) {
 /* ---------- 1. buildReviewArgs ---------- */
 t('review/uncommitted 默认：不带 diff 定位参数', () => {
   const args = buildReviewArgs({ command: 'review' });
-  assert.deepEqual(args, ['review']);
+  assert.deepEqual(args, ['review', '--audience', 'agent']);
 });
-t('review/branch：--branch + --base', () => {
+t('review/branch：--from + --to（head 缺省回退 HEAD）', () => {
   const args = buildReviewArgs({ command: 'review', mode: 'branch', headRef: 'feature/x', baseRef: 'develop' });
-  assert.deepEqual(args, ['review', '--branch', 'feature/x', '--base', 'develop']);
+  assert.deepEqual(args, ['review', '--from', 'develop', '--to', 'feature/x', '--audience', 'agent']);
+  const args2 = buildReviewArgs({ command: 'review', mode: 'branch', baseRef: 'main' });
+  assert.deepEqual(args2, ['review', '--from', 'main', '--to', 'HEAD', '--audience', 'agent']);
 });
 t('review/commit：--commit', () => {
   const args = buildReviewArgs({ command: 'review', mode: 'commit', commit: 'abc123' });
-  assert.deepEqual(args, ['review', '--commit', 'abc123']);
+  assert.deepEqual(args, ['review', '--commit', 'abc123', '--audience', 'agent']);
 });
-t('focus → --background；repo_path → --dir', () => {
+t('focus → --background；repo_path → --repo', () => {
   const args = buildReviewArgs({ command: 'review', focus: '查脱敏', repoPath: 'D:/proj' });
-  assert.deepEqual(args, ['review', '--background', '查脱敏', '--dir', 'D:/proj']);
+  assert.deepEqual(args, ['review', '--repo', 'D:/proj', '--background', '查脱敏', '--audience', 'agent']);
 });
-t('scan：直接收路径', () => {
-  const args = buildReviewArgs({ command: 'scan', repoPath: 'D:/proj' });
-  assert.deepEqual(args, ['scan', 'D:/proj']);
+t('scan：--repo + --audience', () => {
+  const args = buildReviewArgs({ command: 'scan', repoPath: 'D:/proj', focus: 'x' });
+  assert.deepEqual(args, ['scan', '--repo', 'D:/proj', '--background', 'x', '--audience', 'agent']);
 });
 
 /* ---------- 2. 敏感路径 ---------- */
@@ -140,6 +144,74 @@ t('createSettingsSchema() 默认 schema 可构造', () => {
 t('createSettingsSchema(带模型列表) 接收选项（步骤5 动态选项位）', () => {
   const schema = createSettingsSchema([{ value: 'review-model-x', label: 'review-model-x' }]);
   assert.ok(schema && (typeof schema === 'function' || typeof schema === 'object'));
+});
+
+/* ---------- 7. model-provider（步骤5） ---------- */
+t('createModelSource()：session 恒解析为 DeepSeek 官方端点', () => {
+  const src = createModelSource(undefined, {});
+  const ep = src.resolveProvider(SESSION_MODEL);
+  assert.ok(ep, '应解析出端点');
+  assert.equal(ep.url, DEEPSEEK_OFFICIAL_DEFAULT.url);
+  assert.equal(ep.model, 'deepseek-flash');
+  assert.equal(ep.protocol, 'openai');
+  assert.equal(ep.keyEnv, 'DEEPSEEK_API_KEY');
+  assert.ok(['fallback', 'session', 'config-deepseek'].includes(ep.resolvedFrom), `resolvedFrom=${ep.resolvedFrom}`);
+});
+t('createModelSource()：未知模型回退官方默认（选中模型失效语义）', () => {
+  const src = createModelSource(undefined, {});
+  const ep = src.resolveProvider('no-such-model-xyz');
+  assert.ok(ep, '未知模型不应返回 null');
+  assert.equal(ep.model, 'deepseek-flash');
+  assert.equal(ep.url, DEEPSEEK_OFFICIAL_DEFAULT.url);
+});
+t('createModelSource()：listCandidates 首项为 session', () => {
+  const src = createModelSource(undefined, {});
+  const cands = src.listCandidates();
+  assert.ok(cands.length >= 2, `候选应≥2（session+模型），实际 ${cands.length}`);
+  assert.equal(cands[0].value, SESSION_MODEL);
+  assert.ok(cands[0].label.includes('会话'), cands[0].label);
+});
+
+/* ---------- 8. credentials（步骤5，纯函数样例） ---------- */
+t('parseCredentialsText：提取顶层 NAME: value', () => {
+  const text = '# comment\nDEEPSEEK_API_KEY: sk-abc123\nrefs:\n  PARTNER_API_KEY: sk-other\n';
+  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'sk-abc123');
+  assert.equal(parseCredentialsText(text, 'PARTNER_API_KEY'), ''); // 只认顶层，不认嵌套
+});
+t('parseCredentialsText：= 与引号变体', () => {
+  const text = 'KEY_WITH_EQ=sk-x1\nKEY_QUOTED: "sk-x2"\n';
+  assert.equal(parseCredentialsText(text, 'KEY_WITH_EQ'), 'sk-x1');
+  assert.equal(parseCredentialsText(text, 'KEY_QUOTED'), 'sk-x2');
+});
+t('parseCredentialsText：缺名安全空串', () => {
+  const text = 'OTHER: xyz\n';
+  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), '');
+});
+
+/* ---------- 9. prepareEngineEnv（步骤5） ---------- */
+t('prepareEngineEnv：端点和 key 齐备时注入 5 个 OCR_LLM_* 键', () => {
+  const prep = prepareEngineEnv({
+    endpoint: { url: 'https://api.deepseek.com', protocol: 'openai', model: 'deepseek-flash', keyEnv: 'DEEPSEEK_API_KEY', providerLabel: 'DeepSeek 官方' },
+    key: 'sk-test',
+  });
+  assert.ok(prep.injected);
+  assert.equal(prep.env.OCR_LLM_URL, 'https://api.deepseek.com');
+  assert.equal(prep.env.OCR_LLM_TOKEN, 'sk-test');
+  assert.equal(prep.env.OCR_LLM_MODEL, 'deepseek-flash');
+  assert.equal(prep.env.OCR_LLM_PROTOCOL, 'openai');
+  assert.ok(prep.env.OCR_LLM_TIMEOUT > '0');
+  assert.ok(prep.note.includes('DeepSeek 官方'));
+});
+t('prepareEngineEnv：缺 key 不注入（引擎回退自身配置）', () => {
+  const prep = prepareEngineEnv({ endpoint: { url: 'https://x.example', protocol: 'openai', model: 'm', keyEnv: 'K', providerLabel: 'X' }, key: '' });
+  assert.ok(!prep.injected);
+  assert.deepEqual(prep.env, {});
+});
+t('prepareEngineEnv：timeoutMs 折算为秒（下限 30s）', () => {
+  const prep = prepareEngineEnv({ endpoint: { url: 'u', protocol: 'openai', model: 'm', keyEnv: 'K', providerLabel: 'X' }, key: 'k', timeoutMs: 90_000 });
+  assert.equal(prep.env.OCR_LLM_TIMEOUT, '90');
+  const prep2 = prepareEngineEnv({ endpoint: { url: 'u', protocol: 'openai', model: 'm', keyEnv: 'K', providerLabel: 'X' }, key: 'k', timeoutMs: 5_000 });
+  assert.equal(prep2.env.OCR_LLM_TIMEOUT, '30');
 });
 
 console.log(`\n${n} 项单元自检通过${process.exitCode ? '（有失败）' : '，全部 OK'}`);

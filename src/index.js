@@ -18,10 +18,12 @@
  * 零敏感：本文件不硬编码任何平台内部标识；评审模型选项动态来自 DSH 配置。
  */
 import { normalizeConfig, pickOverrides, DEFAULT_CONFIG, SETTINGS_NS } from './config.js';
-import { createSettingsSchema, defaultSettingsSchema } from './settings-schema.js';
-import { locateEngineBin, buildReviewArgs, runEngine, probeEngineVersion } from './runner.js';
+import { createSettingsSchema } from './settings-schema.js';
+import { locateEngineBin, buildReviewArgs, runEngine, probeEngineVersion, prepareEngineEnv } from './runner.js';
 import { writeReport, repoNameOf } from './report.js';
 import { listSensitiveFiles } from './sensitive-list.js';
+import { createModelSource } from './model-provider.js';
+import { resolveApiKey, isKeyMissing } from './credentials.js';
 
 export const name = 'dsh-code-review';
 
@@ -38,13 +40,15 @@ export const TOOL_NAME = 'code_review';
 /* ═══ 一次评审的执行体（工具 execute 与 /review 命令共用） ═══ */
 
 /**
- * 执行一次评审：定位引擎 → 组装参数 → 运行 → 组装结果文本 → 落报告。
+ * 执行一次评审：定位引擎 → 解析评审模型端点 → 注入 key（零落盘）→
+ * 运行引擎 → 组装结果文本 → 落报告。
  *
+ * @param {object} ctx       Cordis 上下文（模型取数/凭据解析）。
  * @param {object} getConfig 实时配置读取函数。
  * @param {object} args      本次评审参数（repo_path/mode/base_ref/head_ref/commit/focus）。
  * @returns {Promise<string>} 会话内返回的问题清单文本。
  */
-async function reviewOnce(getConfig, args) {
+async function reviewOnce(ctx, getConfig, args) {
   const cfg = getConfig();
 
   // 1. 定位引擎（设置 > 包内 bin > PATH）。
@@ -58,7 +62,7 @@ async function reviewOnce(getConfig, args) {
     ].join('\n');
   }
 
-  // 2. 组装 review/scan 参数（diff 三模式 + 重点领域；provider 注入位在步骤 5）。
+  // 2. 组装 review/scan 参数（diff 三模式 + 重点领域）。
   const engineArgs = buildReviewArgs({
     command: args.mode === 'scan' ? 'scan' : 'review',
     mode: args.mode === 'scan' ? undefined : args.mode,
@@ -69,9 +73,26 @@ async function reviewOnce(getConfig, args) {
     repoPath: args.repo_path,
   });
 
+  // 2.5 评审模型解析 + key 注入（步骤 5）。key 只进子进程 env，绝不落盘/进日志。
+  const modelSource = createModelSource(ctx);
+  const reviewModel = cfg.review_model;
+  const endpoint = modelSource.resolveProvider(reviewModel);
+  let engineEnv = {};
+  let injectNote = '';
+  if (endpoint && endpoint.keyEnv) {
+    const key = await resolveApiKey(ctx, endpoint.keyEnv);
+    if (isKeyMissing(key)) {
+      injectNote = `\n> ⚠ 评审模型 ${endpoint.providerLabel} 的凭据（${endpoint.keyEnv}）未找到：请配置环境变量或在 \`~/.dsh/.credentials.yaml\` 中登记后再审。`;
+    } else {
+      const prep = prepareEngineEnv({ endpoint, key, timeoutMs: cfg.review_timeout_ms });
+      engineEnv = prep.env;
+      if (prep.injected) injectNote = `\n> ${prep.note}`;
+    }
+  }
+
   // 3. 运行（同步等待，超时兜底）。
   const start = Date.now();
-  const result = await runEngine({ bin: located.bin, args: engineArgs, timeoutMs: cfg.review_timeout_ms });
+  const result = await runEngine({ bin: located.bin, args: engineArgs, timeoutMs: cfg.review_timeout_ms, env: engineEnv });
   const elapsedSec = ((Date.now() - start) / 1000).toFixed(1);
 
   // 4. 敏感文件点名（步骤 6 接入待提交清单；骨架先处理显式传入的清单位）。
@@ -86,11 +107,14 @@ async function reviewOnce(getConfig, args) {
     `- 命令: codecheck ${engineArgs.join(' ')}`,
     `- 耗时: ${elapsedSec}s`,
     `- 退出码: ${result.code}`,
+    injectNote ? `- 模型注记: ${injectNote.trim().replace(/^\n> /, '')}` : null,
     '',
     '---',
     '',
     result.stdout.trim() || (result.ok ? '(无输出)' : '(无标准输出)'),
-  ].join('\n');
+  ]
+    .filter((x) => x !== null)
+    .join('\n');
   if (!result.ok && result.stderr.trim()) {
     body += `\n\n## 引擎 stderr\n\n\`\`\`\n${result.stderr.trim()}\n\`\`\`\n`;
   }
@@ -110,6 +134,7 @@ async function reviewOnce(getConfig, args) {
     result.ok
       ? `报告已留档：${report.ok ? report.path : `（落盘失败：${report.error}）`}`
       : `（本次失败未产生有效报告${report.ok ? `，但已留档记录：${report.path}` : ''}）`,
+    injectNote,
     sensitiveBlock,
   ]
     .filter(Boolean)
@@ -139,11 +164,11 @@ function buildSensitiveBlock(pendingPaths) {
 /**
  * 创建原生工具 code_review。
  *
- * @param {object} _ctx       Cordis 上下文（保留位：模型取数/凭据在步骤 5 用）。
+ * @param {object} ctx        Cordis 上下文（模型取数/凭据解析）。
  * @param {Function} getConfig 实时配置读取函数。
  * @returns {object} 工具对象（ctx.tools.register 直接消费）。
  */
-export function createReviewTool(_ctx, getConfig) {
+export function createReviewTool(ctx, getConfig) {
   const tool = TOOL_NAME;
   return {
     name: tool,
@@ -198,7 +223,7 @@ export function createReviewTool(_ctx, getConfig) {
       locations: args?.repo_path ? [{ path: String(args.repo_path) }] : [],
     }),
     async execute(args, _exec) {
-      const text = await reviewOnce(getConfig, args ?? {});
+      const text = await reviewOnce(ctx, getConfig, args ?? {});
       // 结果以可读文本返回（渲染给会话）；ok 与否按文本语义由引擎退出码决定，
       // 这里统一带出枚举语义：非致命引擎错误仍返回 ok=false 提示文案在正文。
       return { ok: true, text };
@@ -245,11 +270,16 @@ function registerSettings(ctx) {
       ctx.logger?.warn?.('[dsh-code-review] 宿主未提供 settings 服务，设置面板不可用（默认配置仍生效）。');
       return;
     }
-    const schema = defaultSettingsSchema;
+    // 评审模型选项动态来自 DSH 模型配置（不硬编码）：宿主增删 provider 后自动跟随。
+    const modelSource = createModelSource(ctx);
+    const candidates = modelSource.listCandidates();
+    const schema = createSettingsSchema(candidates);
     if (typeof settings.register === 'function') {
       settings.register(SETTINGS_NS, schema);
+      ctx.logger?.info?.(`[dsh-code-review] 设置命名空间已注册（${SETTINGS_NS}，评审模型选项 ${candidates.length} 个）。`);
     } else if (typeof settings.installSettingsSection === 'function') {
       settings.installSettingsSection({ namespace: SETTINGS_NS, schema });
+      ctx.logger?.info?.('[dsh-code-review] 设置分区已安装（installSettingsSection 通道）。');
     } else {
       ctx.logger?.warn?.('[dsh-code-review] 宿主 settings 服务无 register/installSettingsSection，设置面板不可用。');
     }
@@ -279,7 +309,7 @@ function registerCommand(ctx, getConfig) {
       .option('commit, -c <commit>', 'commit 模式的提交号')
       .option('focus, -f <focus>', '本次评审重点领域（一句话背景）')
       .action(async (argv) => {
-        const text = await reviewOnce(getConfig, {
+        const text = await reviewOnce(ctx, getConfig, {
           mode: argv.mode,
           repo_path: argv.repo,
           base_ref: argv.base,
