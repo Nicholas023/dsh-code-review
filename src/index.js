@@ -19,7 +19,7 @@
  */
 import { normalizeConfig, pickOverrides, DEFAULT_CONFIG, SETTINGS_NS } from './config.js';
 import { createSettingsSchema } from './settings-schema.js';
-import { locateEngineBin, buildReviewArgs, runEngine, probeEngineVersion, prepareEngineEnv } from './runner.js';
+import { locateEngineBin, buildReviewArgs, runEngine, probeEngineVersion, prepareEngineEnv, collectPendingPaths } from './runner.js';
 import { writeReport, repoNameOf } from './report.js';
 import { listSensitiveFiles } from './sensitive-list.js';
 import { createModelSource } from './model-provider.js';
@@ -95,11 +95,16 @@ async function reviewOnce(ctx, getConfig, args) {
   const result = await runEngine({ bin: located.bin, args: engineArgs, timeoutMs: cfg.review_timeout_ms, env: engineEnv });
   const elapsedSec = ((Date.now() - start) / 1000).toFixed(1);
 
-  // 4. 敏感文件点名（步骤 6 接入待提交清单；骨架先处理显式传入的清单位）。
-  const sensitiveBlock = buildSensitiveBlock(args.pending_paths);
+  // 4. 敏感文件点名（步骤 6）：显式 pending_paths 优先；缺省自动收集
+  //    repo 待提交清单（git ls-files --others + diff）。命中敏感模式的
+  //    文件只点名不读内容（内容由引擎侧排除，双保险）。
+  const pendingPaths = Array.isArray(args.pending_paths) && args.pending_paths.length > 0
+    ? args.pending_paths
+    : collectPendingPaths(args.repo_path);
+  const sensitiveBlock = buildSensitiveBlock(pendingPaths);
 
   // 5. 落报告（失败不阻断：结果文本仍返回，错误随文本告知）。
-  const body = [
+  let body = [
     '# 代码审查报告',
     '',
     `- 仓库: ${repoNameOf(args.repo_path || '')}`,
@@ -117,6 +122,10 @@ async function reviewOnce(ctx, getConfig, args) {
     .join('\n');
   if (!result.ok && result.stderr.trim()) {
     body += `\n\n## 引擎 stderr\n\n\`\`\`\n${result.stderr.trim()}\n\`\`\`\n`;
+  }
+  // 敏感点名块进报告文件（判据⑥：报告里出现点名项；会话 tail 也保留一次）。
+  if (sensitiveBlock) {
+    body += `\n${sensitiveBlock}\n`;
   }
 
   const report = await writeReport({
@@ -407,3 +416,5 @@ export function apply(ctx, configRaw) {
 
 /* 默认配置导出（宿主 schema 校验/测试引用）。 */
 export { DEFAULT_CONFIG, SETTINGS_NS };
+/* 评审执行体导出（e2e/单元判据载体：sensitive-e2e、后续步骤可复现链路）。 */
+export { reviewOnce, buildSensitiveBlock };

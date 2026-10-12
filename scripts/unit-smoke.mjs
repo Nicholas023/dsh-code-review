@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
-const { buildReviewArgs, runEngine, prepareEngineEnv } = await import(new URL('../src/runner.js', import.meta.url).href);
+const { buildReviewArgs, runEngine, prepareEngineEnv, collectPendingPaths } = await import(new URL('../src/runner.js', import.meta.url).href);
 const { isSensitivePath, listSensitiveFiles } = await import(new URL('../src/sensitive-list.js', import.meta.url).href);
 const { reportFilePath, repoNameOf } = await import(new URL('../src/report.js', import.meta.url).href);
 const { normalizeConfig, DEFAULT_CONFIG } = await import(new URL('../src/config.js', import.meta.url).href);
@@ -218,6 +218,33 @@ t('prepareEngineEnv：timeoutMs 折算为秒（下限 30s）', () => {
   assert.equal(prep.env.OCR_LLM_TIMEOUT, '90');
   const prep2 = prepareEngineEnv({ endpoint: { url: 'u', protocol: 'openai', model: 'm', keyEnv: 'K', providerLabel: 'X' }, key: 'k', timeoutMs: 5_000 });
   assert.equal(prep2.env.OCR_LLM_TIMEOUT, '30');
+});
+
+/* ---------- 10. collectPendingPaths（步骤6，临时 git 仓库） ---------- */
+t('collectPendingPaths：untracked+modified 并集（步骤6 待提交清单）', async () => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { spawnSync } = await import('node:child_process');
+  const repo = mkdtempSync(join(tmpdir(), 'dcr-pp-'));
+  try {
+    spawnSync('git', ['init', '-b', 'main', repo], { stdio: 'ignore' });
+    writeFileSync(join(repo, 'tracked.py'), 'x = 1\n', 'utf8');
+    spawnSync('git', ['-C', repo, 'add', '-A'], { stdio: 'ignore' });
+    spawnSync('git', ['-C', repo, '-c', 'user.name=p', '-c', 'user.email=p@i', 'commit', '-m', 'd'], { stdio: 'ignore' });
+    writeFileSync(join(repo, 'tracked.py'), 'x = 2\n', 'utf8'); // modified
+    writeFileSync(join(repo, 'new.env'), 'K=v\n', 'utf8'); // untracked
+    writeFileSync(join(repo, 'ignored.tmp'), 'x\n', 'utf8'); // 在 .gitignore 里 → 不收集
+    writeFileSync(join(repo, '.gitignore'), '*.tmp\n', 'utf8');
+    const pending = collectPendingPaths(repo);
+    assert.deepEqual(pending.sort(), ['.gitignore', 'new.env', 'tracked.py'].sort());
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+t('collectPendingPaths：空路径/非 git 目录 → []（点名层静默跳过）', async () => {
+  const { tmpdir } = await import('node:os');
+  assert.deepEqual(collectPendingPaths(''), []);
+  assert.deepEqual(collectPendingPaths(join(tmpdir(), 'no-such-git-repo-xyz')), []);
 });
 
 console.log(`\n${n} 项单元自检通过${process.exitCode ? '（有失败）' : '，全部 OK'}`);
