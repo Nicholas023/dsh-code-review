@@ -70,12 +70,14 @@ npm run unit                         # 确定性模块自检（28 项，不联�
 npm run smoke                        # Cordis 入口冒烟自检（挂载前提验证）
 npm run e2e-engine                   # 引擎侧端到端（真实 DeepSeek 官方评审，需本机凭据）
 npm run e2e-plugin                   # 插件管道端到端（model-provider→credentials→runner）
-npm run e2e-switch                   # 切模型端到端（默认  异构评审实证，可传模型 id）
+npm run e2e-switch                   # 切模型端到端（默认取本机 DSH 配置中的任一模型 id，实证「面板另选也通」）
+npm run e2e-sensitive                # 敏感文件点名层端到端（判据⑥：含 .env 仓库 → 报告点名）
 npm run selfcheck                    # unit + smoke 全量
 ```
 
-> e2e 两个脚本会调用真实评审 API（约 15s / 次、数千 token），在 CI/无凭据环境会自动
-> 判失败并给出明确原因，会话内判据⑤用它实证。
+> e2e 会调用真实评审 API（约 10-50s / 次、数千 token），在 CI/无凭据环境会自动
+> 判失败并给出明确原因。切模型实证默认模型可经命令行参数替换：`node scripts/switch-model-e2e.mjs <模型id>`
+> （模型 id 以本机 DSH 配置为准，即设置面板「评审模型」选择器里的选项）。
 
 ## 许可
 

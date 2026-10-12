@@ -3,7 +3,7 @@
  *
  * 通道优先级（任何一步取到非空即停）：
  *   1. 环境变量（DSH 会话/宿主已注入，如 DEEPSEEK_API_KEY）；
- *   2. ~/.dsh/.credentials.yaml 同名条目（只读正则解析，引用名 → 值）；
+ *   2. DSH 凭据文件（home 下 .dsh 目录的凭据 yaml）同名条目（只读正则解析）；
  *   3. ctx.credentials（DSH 凭据 seam 官方取数口，尽力而为）。
  *
  * 安全卫生：返回值只在调用进程内存中流转，随后经 spawn env 传给引擎子进程；
@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 /** 从凭据文本中提取指定引用名的值。
- * 实况（2026-10-12 实证 ~/.dsh/.credentials.yaml）：所有凭据引用在
+ * 实况（2026-10-12 实证 DSH 凭据 yaml）：所有凭据引用在
  * `refs:` 段下（缩进 2），顶层只有 version/refs/records。因此匹配
  * 「0~4 空格缩进 + NAME: value」（兼容顶层无缩进与 refs 段 2 空格），
  * 刻意不匹配更深缩进（如 records 段），避免误读非凭据内容。 */
@@ -28,7 +28,7 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** 读 ~/.dsh/.credentials.yaml 中指定引用名的值（只读 yaml 顶层键）。 */
+/** 读 DSH 凭据文件中指定引用名的值（只读 yaml 顶层/refs 段键）。 */
 function readCredentialsYaml(name) {
   try {
     const file = join(homedir(), '.dsh', '.credentials.yaml');
