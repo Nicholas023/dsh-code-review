@@ -12,7 +12,8 @@
  *   ④ 用假的 slots + configForms 上下文调 apply，再渲染卡片
  *      （summary + 全卡两种视图）断言全程不抛；
  *   ⑤ ⭐ 界面字段 ≡ schema 键 双向一致性断言：client.js FIELDS 的 key
- *      与服务端 src/settings-schema.js 的 z.object 键**完全相等**——
+ *      与插件导出的 Config（0.2.0 configForms 表单真源）键**完全相等**，
+ *      且 settings 命名空间 schema 键与 Config 同集（防双源漂移）——
  *      表单缺字段或键名写错会在提交前被拦下（照 宿主范式冒烟同款纪律）。
  *
  * 运行：node scripts/client-bundle-smoke.mjs（零依赖，不联网）。
@@ -22,6 +23,7 @@ import vm from 'node:vm';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createSettingsSchema } from '../src/settings-schema.js';
+import { Config } from '../src/plugin-config.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const clientSrc = readFileSync(join(ROOT, 'client.js'), 'utf8');
@@ -137,20 +139,34 @@ check('全卡含保存操作（保存按钮文案在产物中）', JSON.stringif
  * 动态 key 表达式不命中，避免把其它对象属性误当字段）。
  */
 const fieldKeys = [...clientSrc.matchAll(/\{\s*key:\s*'([a-z0-9_]+)'/g)].map((m) => m[1]);
-const schema = createSettingsSchema([]);
 /** schemastery object 的键：toJSON 的 root 节点（refs[uid]）的 dict；无法取到则报缺陷。 */
-let schemaKeys = [];
-try {
-  const serialized = typeof schema.toJSON === 'function' ? schema.toJSON() : null;
-  const root = serialized?.refs?.[serialized?.uid];
-  schemaKeys = Object.keys(root?.dict ?? {});
-} catch { /* 测不出 schema 键则保持空数组（下方断言会报失败） */ }
-const diffUi = fieldKeys.filter((k) => !schemaKeys.includes(k));
-const diffSchema = schemaKeys.filter((k) => !fieldKeys.includes(k));
-check('client FIELDS 键与服务端 schema 键完全一致（双向）', schemaKeys.length > 0 && diffUi.length === 0 && diffSchema.length === 0,
-  `client=[${fieldKeys.join(',')}] schema=[${schemaKeys.join(',')}]` +
+function schemaKeysOf(schema) {
+  try {
+    const serialized = typeof schema.toJSON === 'function' ? schema.toJSON() : null;
+    const root = serialized?.refs?.[serialized?.uid];
+    return Object.keys(root?.dict ?? {});
+  } catch { /* 测不出 schema 键则保持空数组（下方断言会报失败） */ }
+  return [];
+}
+// 0.2.0 configForms 表单字段真源 = 插件导出的 Config（宿主 describe 读 entry.fiber.runtime.Config）。
+const configKeys = schemaKeysOf(Config);
+// 服务端 settings 命名空间 schema（0.1.x 保底通道 + 动态模型选项）——键必须与 Config 严格同集，
+// 否则两处漂移会导致设置页保存的字段运行时读不到。
+const schemaKeys = schemaKeysOf(createSettingsSchema([]));
+const diffUi = fieldKeys.filter((k) => !configKeys.includes(k));
+const diffConfig = configKeys.filter((k) => !fieldKeys.includes(k));
+const diffCross = schemaKeys.filter((k) => !configKeys.includes(k));
+const diffCross2 = configKeys.filter((k) => !schemaKeys.includes(k));
+check('client FIELDS 键与插件 Config（configForms 真源）键完全一致（双向）',
+  configKeys.length > 0 && diffUi.length === 0 && diffConfig.length === 0,
+  `client=[${fieldKeys.join(',')}] config=[${configKeys.join(',')}]` +
   (diffUi.length ? ` ｜client 多出:${diffUi.join(',')}` : '') +
-  (diffSchema.length ? ` ｜schema 多出:${diffSchema.join(',')}` : ''));
+  (diffConfig.length ? ` ｜config 多出:${diffConfig.join(',')}` : ''));
+check('settings 命名空间 schema 键与插件 Config 键一致（防双源漂移）',
+  schemaKeys.length > 0 && diffCross.length === 0 && diffCross2.length === 0,
+  `settings=[${schemaKeys.join(',')}] config=[${configKeys.join(',')}]` +
+  (diffCross.length ? ` ｜settings 多出:${diffCross.join(',')}` : '') +
+  (diffCross2.length ? ` ｜config 多出:${diffCross2.join(',')}` : ''));
 
 /* ── 汇总 ── */
 let failed = 0;
