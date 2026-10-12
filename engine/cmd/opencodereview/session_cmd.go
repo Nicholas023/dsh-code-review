@@ -1,0 +1,813 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/session"
+	"github.com/alibaba/open-code-review/internal/viewer"
+	"github.com/spf13/cobra"
+)
+
+var sessionCmd = &cobra.Command{
+	Use:     "session",
+	Aliases: []string{"sessions"},
+	Short:   "List and inspect saved review sessions",
+	Args:    cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return cmd.Help()
+	},
+}
+
+var sessionListRepoDir string
+var sessionListJSON bool
+var sessionListLimit int
+
+var sessionListCmd = &cobra.Command{
+	Use:     "list [flags]",
+	Aliases: []string{"ls"},
+	Short:   "List recent review sessions for the current repo",
+	Long:    "List review sessions previously persisted to ~/.opencodereview/sessions/.\nThe session id printed here can be passed to 'ocr review --resume <id>'.",
+	Args:    cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionList()
+	},
+}
+
+var sessionShowRepoDir string
+var sessionShowJSON bool
+
+var sessionShowCmd = &cobra.Command{
+	Use:               "show [flags] <session-id>",
+	Short:             "Show one session's metadata and per-file items",
+	Args:              exactArgs(1),
+	ValidArgsFunction: completeSessionIDs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionShow(args[0])
+	},
+}
+
+var sessionCommentsRepoDir string
+var sessionCommentsJSON bool
+var sessionCommentsSeverity string
+var sessionCommentsCategory string
+
+var sessionCommentsCmd = &cobra.Command{
+	Use:               "comments [flags] <session-id>",
+	Short:             "Show the review comments recorded in one session",
+	Long:              "Print every review comment persisted in a session, formatted like 'ocr review' terminal output.\nUse --json for machine-readable output and --severity/--category to filter findings.",
+	Args:              exactArgs(1),
+	ValidArgsFunction: completeSessionIDs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionComments(args[0])
+	},
+}
+
+var sessionCompareRepoDir string
+var sessionCompareJSON bool
+
+var sessionCompareCmd = &cobra.Command{
+	Use:     "compare [flags] <before-session-id> <after-session-id>",
+	Aliases: []string{"diff"},
+	Short:   "Compare the findings of two sessions",
+	Long:    "Group the findings of two review sessions into new, persisting, resolved and not-reviewed.\nFindings are matched on path, category and the offending snippet, so a finding that only moved down the file still counts as persisting.\nUse --json for machine-readable output.",
+	Args:    exactArgs(2),
+	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 1 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeSessionIDs(cmd, nil, toComplete)
+	},
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionCompare(args[0], args[1])
+	},
+}
+
+var sessionExportRepoDir string
+var sessionExportOutput string
+
+var sessionExportCmd = &cobra.Command{
+	Use:   "export [flags] [session-id]",
+	Short: "Export one session as a self-contained HTML file",
+	Long: "Render a persisted review session as a single HTML file that opens offline:\n" +
+		"the viewer's stylesheet and script are inlined, so the artifact needs no network\n" +
+		"access and can be archived by CI. With no session id the newest session for the\n" +
+		"repo is exported.\n\n" +
+		"The artifact embeds the reviewed source excerpts the session recorded; treat it\n" +
+		"with the same care as the repository itself.",
+	Example: "  ocr session export -o review.html\n" +
+		"  ocr session export 20250601-100000-abc123 -o review.html",
+	Args:              maximumArgs(1),
+	ValidArgsFunction: completeSessionIDs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		var id string
+		if len(args) == 1 {
+			id = args[0]
+		}
+		return runSessionExport(id)
+	},
+}
+
+var sessionRmRepoDir string
+var sessionRmYes bool
+
+var sessionRmCmd = &cobra.Command{
+	Use:     "rm [flags] <session-id>",
+	Aliases: []string{"delete", "remove"},
+	Short:   "Delete one saved review session",
+	Long: "Delete a persisted review session from ~/.opencodereview/sessions/.\n\n" +
+		"The id is enough on its own, so this works from anywhere; --repo only narrows\n" +
+		"the search. An id saved for more than one repository is listed, not guessed at.\n\n" +
+		"The file cannot be recovered, so this confirms first unless --yes is given.",
+	Example: "  ocr session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b\n" +
+		"  ocr session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b --yes\n" +
+		"  ocr session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b --repo ~/work/my-project",
+	Args:              exactArgs(1),
+	ValidArgsFunction: completeSessionIDsAnywhere,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionRm(cmd, args[0])
+	},
+}
+
+// completeSessionIDs offers the persisted session ids for the current repo
+// (or --repo, when already typed) as shell completions, newest first, with a
+// short summary as the completion description. It completes one positional;
+// a command with two session ids (compare) resets args per positional.
+func completeSessionIDsAnywhere(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) != 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	if repo, _ := cmd.Flags().GetString("repo"); strings.TrimSpace(repo) != "" {
+		return completeSessionIDs(cmd, args, toComplete)
+	}
+	locations, err := session.ListAllSessionIDs()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	completions := make([]string, 0, len(locations))
+	for _, loc := range locations {
+		if !strings.HasPrefix(loc.SessionID, toComplete) {
+			continue
+		}
+		repo := loc.RepoDir
+		if repo == "" {
+			repo = "(repository not recorded)"
+		}
+		completions = append(completions, loc.SessionID+"\t"+repo)
+	}
+	return completions, cobra.ShellCompDirectiveNoFileComp
+}
+
+func completeSessionIDs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) != 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	repo, _ := cmd.Flags().GetString("repo")
+	resolvedRepo, err := resolveWorkingDirForSession(repo)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	summaries, err := session.ListSessions(resolvedRepo)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	completions := make([]string, 0, len(summaries))
+	for _, s := range summaries {
+		if !strings.HasPrefix(s.SessionID, toComplete) {
+			continue
+		}
+		desc := fmt.Sprintf("%s · %d comments · %s", describeStart(s), s.TotalComments, describeStatus(s))
+		completions = append(completions, s.SessionID+"\t"+desc)
+	}
+	return completions, cobra.ShellCompDirectiveNoFileComp
+}
+
+func init() {
+	sessionListCmd.Flags().StringVar(&sessionListRepoDir, "repo", "", "root directory of the git repository (default: current dir)")
+	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit JSON instead of a table")
+	sessionListCmd.Flags().IntVar(&sessionListLimit, "limit", 20, "cap the number of listed sessions (0 = unlimited)")
+
+	sessionShowCmd.Flags().StringVar(&sessionShowRepoDir, "repo", "", "root directory of the git repository (default: current dir)")
+	sessionShowCmd.Flags().BoolVar(&sessionShowJSON, "json", false, "emit JSON instead of a table")
+
+	sessionCommentsCmd.Flags().StringVar(&sessionCommentsRepoDir, "repo", "", "root directory of the git repository (default: current dir)")
+	sessionCommentsCmd.Flags().BoolVar(&sessionCommentsJSON, "json", false, "emit the comments as a JSON array")
+	sessionCommentsCmd.Flags().StringVar(&sessionCommentsSeverity, "severity", "", "comma-separated severities to include (critical, high, medium, low)")
+	sessionCommentsCmd.Flags().StringVar(&sessionCommentsCategory, "category", "", "comma-separated categories to include (e.g. bug, security)")
+	sessionCommentsCmd.RegisterFlagCompletionFunc("severity", completeEnum("critical", "high", "medium", "low"))
+	sessionCommentsCmd.RegisterFlagCompletionFunc("category", completeEnum("bug", "security", "performance", "maintainability", "test", "style", "documentation", "other"))
+
+	sessionCompareCmd.Flags().StringVar(&sessionCompareRepoDir, "repo", "", "root directory of the git repository (default: current dir)")
+	sessionCompareCmd.Flags().BoolVar(&sessionCompareJSON, "json", false, "emit the comparison as JSON")
+
+	sessionExportCmd.Flags().StringVar(&sessionExportRepoDir, "repo", "", "root directory of the git repository (default: current dir)")
+	addOutputPathFlag(sessionExportCmd, &sessionExportOutput)
+
+	sessionRmCmd.Flags().StringVar(&sessionRmRepoDir, "repo", "", "only look for the session under this repository (default: every repository)")
+	sessionRmCmd.Flags().BoolVarP(&sessionRmYes, "yes", "y", false, "delete without asking for confirmation")
+
+	sessionCmd.AddCommand(sessionListCmd)
+	sessionCmd.AddCommand(sessionShowCmd)
+	sessionCmd.AddCommand(sessionCommentsCmd)
+	sessionCmd.AddCommand(sessionCompareCmd)
+	sessionCmd.AddCommand(sessionExportCmd)
+	sessionCmd.AddCommand(sessionRmCmd)
+}
+
+// runSessionExport writes one session's standalone HTML page to --output, or to
+// stdout when it is unset. The session id is optional because a *successful*
+// `ocr review` never prints one — review_cmd.go only reports it on failure — so
+// requiring it would force every CI archive step through `--format json | jq`.
+func runSessionExport(sessionID string) (retErr error) {
+	resolvedRepo, err := resolveWorkingDirForSession(sessionExportRepoDir)
+	if err != nil {
+		return err
+	}
+
+	if sessionID == "" {
+		summaries, err := session.ListSessions(resolvedRepo)
+		if err != nil {
+			return err
+		}
+		if len(summaries) == 0 {
+			return fmt.Errorf("no sessions found for %s; run a review first, or pass a session id", resolvedRepo)
+		}
+		sessionID = summaries[0].SessionID
+	}
+
+	dir, err := session.SessionsDir(resolvedRepo)
+	if err != nil {
+		return err
+	}
+	root, encodedRepo := filepath.Split(dir)
+
+	out, closeOut, err := resolveOutputWriter(sessionExportOutput, "html")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := closeOut(); cerr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close output file: %w", cerr))
+		}
+	}()
+
+	return viewer.ExportSession(out, filepath.Clean(root), encodedRepo, sessionID)
+}
+
+func runSessionList() error {
+	resolvedRepo, err := resolveWorkingDirForSession(sessionListRepoDir)
+	if err != nil {
+		return err
+	}
+	summaries, err := session.ListSessions(resolvedRepo)
+	if err != nil {
+		return fmt.Errorf("list sessions: %w", err)
+	}
+	if sessionListLimit > 0 && len(summaries) > sessionListLimit {
+		summaries = summaries[:sessionListLimit]
+	}
+
+	if sessionListJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(summaries)
+	}
+
+	if len(summaries) == 0 {
+		fmt.Printf("No sessions found for %s\n", resolvedRepo)
+		return nil
+	}
+	printSessionTable(os.Stdout, summaries)
+	return nil
+}
+
+func runSessionShow(sessionID string) error {
+	resolvedRepo, err := resolveWorkingDirForSession(sessionShowRepoDir)
+	if err != nil {
+		return err
+	}
+	summary, items, err := session.LoadDetail(resolvedRepo, sessionID)
+	if err != nil {
+		return fmt.Errorf("load session %q: %w", sessionID, err)
+	}
+
+	if sessionShowJSON {
+		payload := struct {
+			Summary *session.Summary     `json:"summary"`
+			Items   []session.ItemDetail `json:"items"`
+		}{Summary: summary, Items: items}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(payload)
+	}
+
+	printSessionDetail(os.Stdout, summary, items)
+	return nil
+}
+
+func runSessionComments(sessionID string) error {
+	resolvedRepo, err := resolveWorkingDirForSession(sessionCommentsRepoDir)
+	if err != nil {
+		return err
+	}
+	comments, err := session.LoadComments(resolvedRepo, sessionID)
+	if err != nil {
+		return fmt.Errorf("load session %q: %w", sessionID, err)
+	}
+	filtered := filterComments(comments, sessionCommentsSeverity, sessionCommentsCategory)
+
+	if sessionCommentsJSON {
+		if filtered == nil {
+			filtered = []model.LlmComment{}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(filtered)
+	}
+
+	if len(filtered) == 0 {
+		if len(comments) == 0 {
+			fmt.Printf("No comments recorded in session %s.\n", sessionID)
+		} else {
+			fmt.Printf("No comments match the given filters (%d recorded in session %s).\n", len(comments), sessionID)
+		}
+		return nil
+	}
+	for _, c := range filtered {
+		renderComment(c, os.Stdout)
+	}
+	return nil
+}
+
+func runSessionCompare(beforeID, afterID string) error {
+	resolvedRepo, err := resolveWorkingDirForSession(sessionCompareRepoDir)
+	if err != nil {
+		return err
+	}
+	beforeSummary, err := session.LoadSummary(resolvedRepo, beforeID)
+	if err != nil {
+		return fmt.Errorf("load session %q: %w", beforeID, err)
+	}
+	afterSummary, err := session.LoadSummary(resolvedRepo, afterID)
+	if err != nil {
+		return fmt.Errorf("load session %q: %w", afterID, err)
+	}
+	if beforeSummary.RepoDir != afterSummary.RepoDir {
+		return fmt.Errorf("sessions belong to different repositories: %s was recorded in %s, %s in %s",
+			beforeID, beforeSummary.RepoDir, afterID, afterSummary.RepoDir)
+	}
+	if beforeSummary.ReviewMode != afterSummary.ReviewMode {
+		fmt.Fprintf(os.Stderr, "[codecheck] WARNING review modes differ (%s vs %s); the two runs may not have looked at the same files\n",
+			displayMode(beforeSummary.ReviewMode), displayMode(afterSummary.ReviewMode))
+	}
+
+	beforeComments, err := session.LoadComments(resolvedRepo, beforeID)
+	if err != nil {
+		return fmt.Errorf("load session %q: %w", beforeID, err)
+	}
+	afterComments, err := session.LoadComments(resolvedRepo, afterID)
+	if err != nil {
+		return fmt.Errorf("load session %q: %w", afterID, err)
+	}
+	result := session.Compare(beforeComments, afterComments, afterSummary.RunManifest)
+
+	if sessionCompareJSON {
+		payload := struct {
+			Before sessionCompareSide `json:"before"`
+			After  sessionCompareSide `json:"after"`
+			session.CompareResult
+		}{
+			Before:        describeCompareSide(beforeID, beforeSummary),
+			After:         describeCompareSide(afterID, afterSummary),
+			CompareResult: result,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(payload)
+	}
+
+	printSessionCompare(beforeID, afterID, beforeSummary, afterSummary, result)
+	return nil
+}
+
+// sessionCompareSide identifies one side of the comparison in JSON output, so a
+// consumer can tell which run produced which bucket.
+type sessionCompareSide struct {
+	SessionID  string `json:"session_id"`
+	ReviewMode string `json:"review_mode,omitempty"`
+	Range      string `json:"range,omitempty"`
+}
+
+func describeCompareSide(sessionID string, s *session.Summary) sessionCompareSide {
+	side := sessionCompareSide{SessionID: sessionID, ReviewMode: s.ReviewMode}
+	if r := describeRange(*s); r != "-" {
+		side.Range = r
+	}
+	return side
+}
+
+// printSessionCompare writes to stdout, matching the other `ocr session`
+// subcommands.
+func printSessionCompare(beforeID, afterID string, before, after *session.Summary, result session.CompareResult) {
+	fmt.Printf("Comparing %s -> %s\n", beforeID, afterID)
+	fmt.Printf("  before: %s %s\n", displayMode(before.ReviewMode), describeRange(*before))
+	fmt.Printf("  after:  %s %s\n", displayMode(after.ReviewMode), describeRange(*after))
+	fmt.Printf("%d new, %d persisting, %d resolved\n", len(result.New), len(result.Persisting), len(result.Resolved))
+	if n := len(result.NotReviewed); n > 0 {
+		fmt.Printf("%d finding(s) in files the after session did not review (not counted as resolved)\n", n)
+	}
+
+	for _, section := range []struct {
+		title    string
+		findings []model.LlmComment
+	}{
+		{"New", result.New},
+		{"Persisting", result.Persisting},
+		{"Resolved", result.Resolved},
+		{"Not reviewed", result.NotReviewed},
+	} {
+		if len(section.findings) == 0 {
+			continue
+		}
+		fmt.Printf("\n=== %s (%d) ===\n", section.title, len(section.findings))
+		for _, c := range section.findings {
+			renderComment(c, os.Stdout)
+		}
+	}
+}
+
+// filterComments keeps comments whose severity and category are in the given
+// comma-separated, case-insensitive filter lists. Empty filters keep everything.
+func filterComments(comments []model.LlmComment, severities, categories string) []model.LlmComment {
+	sevSet := parseFilterSet(severities)
+	catSet := parseFilterSet(categories)
+	if sevSet == nil && catSet == nil {
+		return comments
+	}
+	var out []model.LlmComment
+	for _, c := range comments {
+		if sevSet != nil && !sevSet[strings.ToLower(c.Severity)] {
+			continue
+		}
+		if catSet != nil && !catSet[strings.ToLower(c.Category)] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func parseFilterSet(s string) map[string]bool {
+	set := map[string]bool{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part != "" {
+			set[part] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// runSessionRm deletes one persisted session, confirming first unless --yes.
+func runSessionRmAnywhere(cmd *cobra.Command, sessionID string) error {
+	found, err := session.FindSessionsByID(sessionID)
+	if err != nil {
+		return err
+	}
+	switch len(found) {
+	case 0:
+		return fmt.Errorf("no session %q is saved for any repository; run 'ocr session list' to see what is saved", sessionID)
+	case 1:
+	default:
+		var b strings.Builder
+		fmt.Fprintf(&b, "session %q is saved for more than one repository:\n", sessionID)
+		for _, loc := range found {
+			repo := loc.RepoDir
+			if repo == "" {
+				repo = "(repository not recorded)"
+			}
+			fmt.Fprintf(&b, "  %s\n", repo)
+		}
+		b.WriteString("\nRe-run with --repo to say which one to delete from.")
+		return errors.New(b.String())
+	}
+
+	loc := found[0]
+	summary, summaryErr := session.LoadSummaryAt(loc.Path, sessionID, loc.RepoDir)
+	if summaryErr != nil {
+		return fmt.Errorf("cannot read session %q: %w", sessionID, summaryErr)
+	}
+	readable := summary != nil && !summary.StartTime.IsZero()
+
+	if !sessionRmYes {
+		if readable {
+			fmt.Fprintf(cmd.OutOrStdout(), "Delete session %s?\n  repo:     %s\n  branch:   %s\n  started:  %s\n  files:    %s\n  comments: %d\n",
+				sessionID, summary.RepoDir, summary.GitBranch, describeStart(*summary), describeFiles(*summary), summary.TotalComments)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Delete session %s? (its metadata could not be read)\n", sessionID)
+		}
+		ok, err := confirmDeletion(cmd)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintln(cmd.OutOrStdout(), "Cancelled.")
+			return nil
+		}
+	}
+
+	if err := session.DeleteSessionAt(loc); err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return fmt.Errorf("no session %q is saved for any repository; run 'ocr session list' to see what is saved", sessionID)
+		}
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Deleted session %s\n", sessionID)
+	return nil
+}
+
+func runSessionRm(cmd *cobra.Command, sessionID string) error {
+	if err := session.ValidateSessionID(sessionID); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(sessionRmRepoDir) == "" {
+		return runSessionRmAnywhere(cmd, sessionID)
+	}
+
+	repoDir, err := resolveWorkingDirForSession(sessionRmRepoDir)
+	if err != nil {
+		return err
+	}
+
+	summary, summaryErr := session.LoadSummary(repoDir, sessionID)
+	switch {
+	case summaryErr != nil && errors.Is(summaryErr, fs.ErrNotExist):
+		return fmt.Errorf("no session %q for this repository; run 'ocr session list' to see what is saved", sessionID)
+	case summaryErr != nil:
+		return fmt.Errorf("cannot read session %q: %w", sessionID, summaryErr)
+	}
+
+	if err := session.CheckSessionRepo(repoDir, sessionID); err != nil {
+		if errors.Is(err, session.ErrSessionUnverifiable) {
+			return fmt.Errorf("%w\n\nRun 'ocr session rm %s' without --repo: the id locates the file on\nits own, so nothing has to be verified against a repository.", err, sessionID)
+		}
+		if errors.Is(err, session.ErrSessionOtherRepo) {
+			return fmt.Errorf("%w\n\nTwo repository paths can share one session directory, so this session is\nvisible here but belongs elsewhere. Delete it from the repository that\nrecorded it.", err)
+		}
+		return err
+	}
+
+	readable := summary != nil && !summary.StartTime.IsZero()
+
+	if !sessionRmYes {
+		if readable {
+			fmt.Fprintf(cmd.OutOrStdout(), "Delete session %s?\n  repo:     %s\n  branch:   %s\n  started:  %s\n  files:    %s\n  comments: %d\n",
+				sessionID, summary.RepoDir, summary.GitBranch, describeStart(*summary), describeFiles(*summary), summary.TotalComments)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Delete session %s? (its metadata could not be read)\n", sessionID)
+		}
+		ok, err := confirmDeletion(cmd)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintln(cmd.OutOrStdout(), "Cancelled.")
+			return nil
+		}
+	}
+
+	if err := session.DeleteSession(repoDir, sessionID); err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return fmt.Errorf("no session %q for this repository; run 'ocr session list' to see what is saved", sessionID)
+		}
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Deleted session %s\n", sessionID)
+	return nil
+}
+
+// confirmDeletion reads a yes/no answer; a non-interactive stdin answers no.
+func confirmDeletion(cmd *cobra.Command) (bool, error) {
+	fmt.Fprint(cmd.OutOrStdout(), "Type 'y' to confirm: ")
+	reader := bufio.NewReader(cmd.InOrStdin())
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
+}
+
+// resolveWorkingDirForSession accepts an explicit --repo flag value and falls
+// back to the current working directory. Unlike resolveRepoDir it does not
+// require the target to be a git repository, so users can inspect sessions
+// even after archiving a checkout.
+func resolveWorkingDirForSession(input string) (string, error) {
+	dir, _, err := resolveWorkingDir(input, false)
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func printSessionTable(w io.Writer, summaries []session.Summary) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "SESSION ID\tMODE\tRANGE\tFILES\tCOMMENTS\tSTATUS\tSTARTED")
+	for _, s := range summaries {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			s.SessionID,
+			displayMode(s.ReviewMode),
+			describeRange(s),
+			describeFiles(s),
+			s.TotalComments,
+			describeStatus(s),
+			describeStart(s),
+		)
+	}
+	tw.Flush()
+}
+
+func printSessionDetail(w io.Writer, s *session.Summary, items []session.ItemDetail) {
+	fmt.Fprintf(w, "Session: %s\n", s.SessionID)
+	fmt.Fprintf(w, "  File:      %s\n", s.FilePath)
+	fmt.Fprintf(w, "  Repo:      %s\n", s.RepoDir)
+	if s.GitBranch != "" {
+		fmt.Fprintf(w, "  Branch:    %s\n", s.GitBranch)
+	}
+	if s.Model != "" {
+		fmt.Fprintf(w, "  Model:     %s\n", s.Model)
+	}
+	fmt.Fprintf(w, "  Mode:      %s\n", displayMode(s.ReviewMode))
+	if r := describeRange(*s); r != "" && r != "-" {
+		fmt.Fprintf(w, "  Range:     %s\n", r)
+	}
+	if s.ResumedFrom != "" {
+		fmt.Fprintf(w, "  Resumed:   from session %s\n", s.ResumedFrom)
+	}
+	if l := s.ResumeLineage; l != nil {
+		fmt.Fprintf(w, "  Parent:    run %s\n", l.ParentRunID)
+		if l.IsTransition() {
+			fmt.Fprintf(w, "  Transition: %s → %s\n",
+				describeTarget(l.SourceProvider, l.SourceModel),
+				describeTarget(l.TargetProvider, l.TargetModel))
+		}
+	}
+	fmt.Fprintf(w, "  Started:   %s\n", describeStart(*s))
+	if !s.EndTime.IsZero() {
+		fmt.Fprintf(w, "  Ended:     %s\n", s.EndTime.Local().Format("2006-01-02 15:04:05"))
+	}
+	if s.Duration > 0 {
+		fmt.Fprintf(w, "  Duration:  %s\n", s.Duration.Round(time.Second))
+	}
+	fmt.Fprintf(w, "  Status:    %s\n", describeStatus(*s))
+	if s.RunManifest != nil {
+		fmt.Fprintf(w, "  Coverage:  %d selected = %d completed + %d reused + %d failed + %d waived\n",
+			s.SelectedFiles, s.CompletedFiles, s.ReusedFiles, s.FailedFiles, s.WaivedFiles)
+	} else {
+		fmt.Fprintf(w, "  Files:     %d completed, %d reused, %d failed (legacy checkpoints)\n",
+			s.CompletedFiles, s.ReusedFiles, s.FailedFiles)
+	}
+	fmt.Fprintf(w, "  Comments:  %d\n", s.TotalComments)
+	if s.LLMFailures > 0 {
+		fmt.Fprintf(w, "  LLM err:   %d\n", s.LLMFailures)
+	}
+
+	if len(items) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Files:")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  TYPE\tFILE\tCOMMENTS\tNOTE")
+	for _, it := range items {
+		note := ""
+		switch it.Type {
+		case "reused":
+			note = "from " + shortSessionID(it.SourceSessionID)
+		case "failed":
+			note = truncate(it.Error, 60)
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%d\t%s\n", it.Type, it.FilePath, it.Comments, note)
+	}
+	tw.Flush()
+}
+
+// describeTarget renders a provider/model pair for the transition line. Either
+// side may be empty (a non-provider endpoint records no provider name).
+func describeTarget(provider, model string) string {
+	switch {
+	case provider == "" && model == "":
+		return "-"
+	case provider == "":
+		return model
+	case model == "":
+		return provider
+	}
+	return provider + "/" + model
+}
+
+func displayMode(m string) string {
+	if m == "" {
+		return "-"
+	}
+	return m
+}
+
+func describeRange(s session.Summary) string {
+	switch s.ReviewMode {
+	case session.ReviewModeRange:
+		if s.DiffFrom != "" || s.DiffTo != "" {
+			return fmt.Sprintf("%s..%s", s.DiffFrom, s.DiffTo)
+		}
+	case session.ReviewModeCommit:
+		if s.DiffCommit != "" {
+			return s.DiffCommit
+		}
+	}
+	return "-"
+}
+
+func describeFiles(s session.Summary) string {
+	if s.RunManifest != nil {
+		parts := []string{fmt.Sprintf("%d", s.SelectedFiles)}
+		if s.ReusedFiles > 0 {
+			parts = append(parts, fmt.Sprintf("reused %d", s.ReusedFiles))
+		}
+		if s.FailedFiles > 0 {
+			parts = append(parts, fmt.Sprintf("failed %d", s.FailedFiles))
+		}
+		if s.WaivedFiles > 0 {
+			parts = append(parts, fmt.Sprintf("waived %d", s.WaivedFiles))
+		}
+		if len(parts) == 1 {
+			return parts[0]
+		}
+		return parts[0] + " (" + strings.Join(parts[1:], ", ") + ")"
+	}
+	total := s.CompletedFiles + s.ReusedFiles
+	if s.ReusedFiles > 0 {
+		return fmt.Sprintf("%d (reused %d)", total, s.ReusedFiles)
+	}
+	return fmt.Sprintf("%d", total)
+}
+
+func describeStatus(s session.Summary) string {
+	if s.Aborted {
+		return "aborted"
+	}
+	if s.RunManifest != nil {
+		switch s.RunManifest.TerminalState {
+		case session.StateComplete, session.StatePartial, session.StateFailed, session.StateSkipped:
+			return string(s.RunManifest.TerminalState)
+		default:
+			return "unknown"
+		}
+	}
+	if s.FailedFiles > 0 {
+		return fmt.Sprintf("legacy (%d fail)", s.FailedFiles)
+	}
+	return "legacy"
+}
+
+func describeStart(s session.Summary) string {
+	if s.StartTime.IsZero() {
+		return "-"
+	}
+	return s.StartTime.Local().Format("2006-01-02 15:04:05")
+}
+
+func shortSessionID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+func truncate(s string, n int) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\t", " ")
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	if n <= 1 {
+		return "…"
+	}
+	return string(runes[:n-1]) + "…"
+}

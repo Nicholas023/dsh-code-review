@@ -1,0 +1,823 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+package tool
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/alibaba/open-code-review/internal/gitcmd"
+)
+
+func TestBuildGrepArgs_WorkspaceMode(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: ""})
+	args := p.buildGrepArgs("myFunc", false, false, false, nil)
+
+	assertContainsInOrder(t, args, "-e", "myFunc", "--")
+	assertContains(t, args, "-i")
+	assertContains(t, args, "--untracked")
+	if idx := slices.Index(args, "--"); idx >= 0 {
+		for i := 0; i < idx; i++ {
+			if args[i] == "myFunc" && (i == 0 || args[i-1] != "-e") {
+				t.Error("myFunc should only appear as argument to -e, not as positional")
+			}
+		}
+	}
+}
+
+func TestBuildGrepArgs_CommitMode(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: "abc1234"})
+	args := p.buildGrepArgs("myFunc", false, false, false, []string{"pkg/"})
+
+	assertContainsInOrder(t, args, "-e", "myFunc", "abc1234", "--", "pkg/")
+	assertNotContains(t, args, "--untracked")
+	assertNotContains(t, args, "--end-of-options")
+}
+
+func TestBuildGrepArgs_RejectsOptionLikeRef(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: "-O./pwn.sh"})
+	args := p.buildGrepArgs("myFunc", false, false, false, nil)
+	if args != nil {
+		t.Fatalf("expected buildGrepArgs to return nil for option-like ref, got %v", args)
+	}
+}
+
+func TestGitGrep_RejectsOptionLikeRef(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: "-O./pwn.sh"})
+	result, err := p.gitGrep(context.Background(), "myFunc", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "Error: ref must not start with '-'" {
+		t.Fatalf("unexpected result: %s", result)
+	}
+}
+
+func TestBuildGrepArgs_PatternStartingWithDash(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: ""})
+	args := p.buildGrepArgs("-myOption", false, false, false, nil)
+
+	idx := slices.Index(args, "-e")
+	if idx < 0 || idx+1 >= len(args) || args[idx+1] != "-myOption" {
+		t.Errorf("expected -e to immediately precede -myOption, got %v", args)
+	}
+}
+
+func TestBuildGrepArgs_CaseSensitive(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: ""})
+	args := p.buildGrepArgs("foo", true, false, false, nil)
+
+	assertNotContains(t, args, "-i")
+}
+
+func TestBuildGrepArgs_CaseInsensitive(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: ""})
+	args := p.buildGrepArgs("foo", false, false, false, nil)
+
+	assertContains(t, args, "-i")
+}
+
+func TestBuildGrepArgs_PerlRegexp(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: ""})
+	args := p.buildGrepArgs("foo", false, true, false, nil)
+
+	assertContains(t, args, "-P")
+	assertNotContains(t, args, "-F")
+}
+
+func TestBuildGrepArgs_FixedString(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: ""})
+	args := p.buildGrepArgs("foo", false, false, false, nil)
+
+	assertContains(t, args, "-F")
+	assertNotContains(t, args, "-E")
+	assertNotContains(t, args, "-P")
+}
+
+func setupTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %v\n%s", args, err, out)
+		}
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@test.com")
+	run("git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package main\n\nfunc Hello() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "util.go"), []byte("package pkg\n\nfunc Util() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("git", "add", ".")
+	run("git", "commit", "-m", "init")
+	return dir
+}
+
+func getHeadCommit(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestGitGrep_WorkspaceMode_Found(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "", Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "Hello", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "hello.go") {
+		t.Errorf("expected hello.go in result, got: %s", result)
+	}
+}
+
+func TestGitGrep_WorkspaceMode_NoMatch(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "", Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "nonexistentXYZ", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "No matches found" {
+		t.Errorf("expected 'No matches found', got: %s", result)
+	}
+}
+
+func TestGitGrep_ResultLimit(t *testing.T) {
+	for _, mode := range []string{"workspace", "commit", "plain_directory"} {
+		for _, tc := range []struct {
+			name        string
+			binaryCount int
+			firstCount  int
+			secondCount int
+			wantCount   int
+			truncated   bool
+			wantFiles   int
+		}{
+			{name: "below_limit", firstCount: 49, secondCount: 50, wantCount: 99},
+			{name: "exact_limit", firstCount: 50, secondCount: 50, wantCount: 100},
+			{name: "single_file_exact_limit", firstCount: 100, wantCount: 100},
+			{name: "across_files", firstCount: 60, secondCount: 60, wantCount: 100, truncated: true, wantFiles: 2},
+			{name: "single_file", firstCount: 101, wantCount: 100, truncated: true, wantFiles: 1},
+			{name: "binary_before_text", binaryCount: 100, firstCount: 1, wantCount: 1},
+			{name: "binary_with_exact_limit", binaryCount: 1, firstCount: 100, wantCount: 100},
+			{name: "binary_with_truncation", binaryCount: 100, firstCount: 101, wantCount: 100, truncated: true, wantFiles: 1},
+			{name: "binary_only", binaryCount: 101},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				if mode != "plain_directory" {
+					dir = setupTestRepo(t)
+				}
+				for path, count := range map[string]int{"a.go": tc.firstCount, "b.go": tc.secondCount} {
+					if err := os.WriteFile(filepath.Join(dir, path), []byte(strings.Repeat("result_limit_needle\n", count)), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for i := 0; i < tc.binaryCount; i++ {
+					// Sort binary diagnostics before valid text matches.
+					path := filepath.Join(dir, fmt.Sprintf("0_binary_%03d.bin", i))
+					if err := os.WriteFile(path, []byte("\x00result_limit_needle\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				fr := &FileReader{RepoDir: dir, Mode: ModeWorkspace}
+				if mode == "commit" {
+					for _, args := range [][]string{{"add", "."}, {"commit", "-m", "add search fixtures"}} {
+						cmd := exec.Command("git", args...)
+						cmd.Dir = dir
+						if out, err := cmd.CombinedOutput(); err != nil {
+							t.Fatalf("git %v: %v\n%s", args, err, out)
+						}
+					}
+					fr.Mode, fr.Ref = ModeCommit, getHeadCommit(t, dir)
+					fr.Runner = gitcmd.New(1)
+				}
+
+				got, err := NewCodeSearch(fr).Execute(context.Background(), map[string]any{"search_text": "result_limit_needle"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if count := strings.Count(got, "|result_limit_needle\n"); count != tc.wantCount {
+					t.Errorf("returned %d matches, want %d", count, tc.wantCount)
+				}
+				if truncated := strings.Contains(got, "Some files are partially shown or omitted entirely"); truncated != tc.truncated {
+					t.Errorf("truncation notice = %v, want %v", truncated, tc.truncated)
+				}
+				if tc.truncated {
+					if want := fmt.Sprintf("across %d matching files", tc.wantFiles); !strings.Contains(got, want) {
+						t.Errorf("expected note to report %q, got:\n%s", want, got)
+					}
+				}
+				if tc.name == "across_files" {
+					if !strings.Contains(got, "File: a.go\nMatch lines: 60\n") || !strings.Contains(got, "File: b.go\nMatch lines: 40\n") {
+						t.Errorf("expected the first 100 matches in file order, got:\n%s", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestGitGrep_CommitMode_Found(t *testing.T) {
+	dir := setupTestRepo(t)
+	commit := getHeadCommit(t, dir)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: commit, Mode: ModeCommit})
+	result, err := p.gitGrep(context.Background(), "Hello", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "hello.go") {
+		t.Errorf("expected hello.go in result, got: %s", result)
+	}
+	if !strings.Contains(result, "Match lines: 1") {
+		t.Errorf("expected 1 match line, got: %s", result)
+	}
+}
+
+func TestGitGrep_CommitMode_NoMatch(t *testing.T) {
+	dir := setupTestRepo(t)
+	commit := getHeadCommit(t, dir)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: commit, Mode: ModeCommit})
+	result, err := p.gitGrep(context.Background(), "nonexistentXYZ", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "No matches found" {
+		t.Errorf("expected 'No matches found', got: %s", result)
+	}
+}
+
+func TestGitGrep_CommitMode_WithPathspec(t *testing.T) {
+	dir := setupTestRepo(t)
+	commit := getHeadCommit(t, dir)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: commit, Mode: ModeCommit})
+
+	result, err := p.gitGrep(context.Background(), "Util", false, false, []string{"pkg/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "util.go") {
+		t.Errorf("expected util.go in result, got: %s", result)
+	}
+
+	result2, err2 := p.gitGrep(context.Background(), "Hello", false, false, []string{"pkg/"})
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if result2 != "No matches found" {
+		t.Errorf("expected 'No matches found' when pathspec excludes match, got: %s", result2)
+	}
+}
+
+func TestGitGrep_OptionLikeRefDoesNotLaunchPager(t *testing.T) {
+	dir := setupTestRepo(t)
+	proofPath := filepath.Join(dir, "PROOF")
+	pagerPath := filepath.Join(dir, "pwn.sh")
+	if err := os.WriteFile(pagerPath, []byte("#!/bin/sh\nprintf pwned > PROOF\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "-O./pwn.sh", Mode: ModeCommit})
+	result, err := p.gitGrep(context.Background(), "Hello", false, false, []string{"hello.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result, "Error:") {
+		t.Fatalf("expected git error for invalid ref, got: %s", result)
+	}
+	if _, err := os.Stat(proofPath); err == nil {
+		t.Fatal("option-like ref launched pager and created proof file")
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestGitGrep_CommitMode_WithBadPathspec(t *testing.T) {
+	dir := setupTestRepo(t)
+	commit := getHeadCommit(t, dir)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: commit, Mode: ModeCommit})
+
+	result, err := p.gitGrep(context.Background(), "Hello", false, false, []string{"nonexistent/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "No matches found" {
+		t.Errorf("expected 'No matches found' with bad pathspec, got: %s", result)
+	}
+}
+
+func TestGitGrep_LiteralWithRegexMetaChars(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "", Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "Hello()", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "hello.go") {
+		t.Errorf("expected hello.go in result for literal 'Hello()' search, got: %s", result)
+	}
+}
+
+func TestGitGrep_CommitMode_LiteralWithRegexMetaChars(t *testing.T) {
+	dir := setupTestRepo(t)
+	commit := getHeadCommit(t, dir)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: commit, Mode: ModeCommit})
+	result, err := p.gitGrep(context.Background(), "Hello()", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "hello.go") {
+		t.Errorf("expected hello.go in result for literal 'Hello()' search at commit, got: %s", result)
+	}
+}
+
+func TestGitGrep_InvalidRef_ReturnsError(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "nonexistent_ref_abc123", Mode: ModeCommit})
+	result, err := p.gitGrep(context.Background(), "Hello", false, false, nil)
+	if err == nil {
+		t.Fatal("expected invalid ref to return an error")
+	}
+	if result != "" {
+		t.Errorf("expected empty result for invalid ref, got: %s", result)
+	}
+	if !strings.Contains(err.Error(), "git grep failed") {
+		t.Errorf("expected git grep failure, got: %v", err)
+	}
+}
+
+func TestGitGrep_PerlRegexp_InvalidPattern_ReturnsError(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "", Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "(unclosed", false, true, nil)
+	if err == nil {
+		t.Fatal("expected invalid perl regexp to return an error")
+	}
+	if result != "" {
+		t.Errorf("expected empty result for invalid perl regexp, got: %s", result)
+	}
+	if !strings.Contains(err.Error(), "git grep failed") {
+		t.Errorf("expected git grep failure, got: %v", err)
+	}
+}
+
+func TestTrimGitUsage(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{
+			name:   "English",
+			stderr: "error: unknown option `max-count'\nusage: git grep [<options>]\n\n    --cached",
+			want:   "error: unknown option `max-count'",
+		},
+		{
+			name:   "Chinese",
+			stderr: "\u9519\u8bef\uff1a\u672a\u77e5\u9009\u9879 `max-count'\n\u7528\u6cd5\uff1agit grep [<\u9009\u9879>]\n\n    --cached",
+			want:   "\u9519\u8bef\uff1a\u672a\u77e5\u9009\u9879 `max-count'",
+		},
+		{
+			name:   "French",
+			stderr: "erreur : option inconnue `max-count'\nutilisation : git grep [<options>]\n\n    --cached",
+			want:   "erreur : option inconnue `max-count'",
+		},
+		{
+			name:   "Japanese",
+			stderr: "\u30a8\u30e9\u30fc: \u4e0d\u660e\u306a\u30aa\u30d7\u30b7\u30e7\u30f3 `max-count'\n\u4f7f\u7528\u6cd5: git grep [<\u30aa\u30d7\u30b7\u30e7\u30f3>]\n\n    --cached",
+			want:   "\u30a8\u30e9\u30fc: \u4e0d\u660e\u306a\u30aa\u30d7\u30b7\u30e7\u30f3 `max-count'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := trimGitUsage(tt.stderr, 129); got != tt.want {
+				t.Errorf("trimGitUsage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTrimGitUsage_PreservesDiagnosticWithoutUsage(t *testing.T) {
+	stderr := "fatal: ambiguous argument 'missing': unknown revision\nhint: verify the revision name"
+	got := trimGitUsage(stderr, 128)
+	if got != stderr {
+		t.Errorf("trimGitUsage() = %q, want %q", got, stderr)
+	}
+}
+
+func TestTrimGitUsage_WhitespaceOnly(t *testing.T) {
+	if got := trimGitUsage(" \n\t", 129); got != "" {
+		t.Errorf("trimGitUsage() = %q, want empty string", got)
+	}
+}
+
+func assertContains(t *testing.T, args []string, val string) {
+	t.Helper()
+	if !slices.Contains(args, val) {
+		t.Errorf("expected args to contain %q, got %v", val, args)
+	}
+}
+
+func assertNotContains(t *testing.T, args []string, val string) {
+	t.Helper()
+	if slices.Contains(args, val) {
+		t.Errorf("expected args NOT to contain %q, got %v", val, args)
+	}
+}
+
+func assertContainsInOrder(t *testing.T, args []string, vals ...string) {
+	t.Helper()
+	idx := 0
+	for _, a := range args {
+		if idx < len(vals) && a == vals[idx] {
+			idx++
+		}
+	}
+	if idx != len(vals) {
+		t.Errorf("expected args to contain %v in order, got %v (matched up to index %d)", vals, args, idx)
+	}
+}
+
+func TestGitGrep_WorkspaceMode_UntrackedFile(t *testing.T) {
+	dir := setupTestRepo(t)
+	untrackedDir := filepath.Join(dir, "newpkg")
+	if err := os.MkdirAll(untrackedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(untrackedDir, "untracked.go"), []byte("package newpkg\n\nfunc UntrackedFunc() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "", Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "UntrackedFunc", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "untracked.go") {
+		t.Errorf("expected untracked.go in result, got: %s", result)
+	}
+}
+
+// TestGitGrep_NonGitDirectoryFallback verifies code_search works in a plain
+// (non-git) directory by retrying git grep in --no-index mode instead of
+// failing with git's exit 128, while still honoring .gitignore.
+func TestGitGrep_NonGitDirectoryFallback(t *testing.T) {
+	dir := t.TempDir() // plain dir, no `git init`
+
+	write := func(rel, content string) {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("server.go", "package main\n\nfunc Handler() {}\n")
+	write("internal/svc.go", "package internal\n\nfunc Handler() {}\n")
+	write(".gitignore", "node_modules/\n")
+	write("node_modules/lib.js", "function Handler() {}\n") // excluded by .gitignore
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "", Mode: ModeWorkspace})
+
+	out, err := p.gitGrep(context.Background(), "Handler", false, false, nil)
+	if err != nil {
+		t.Fatalf("gitGrep should not error in a non-git dir, got: %v", err)
+	}
+	if !strings.Contains(out, "server.go") || !strings.Contains(out, "internal/svc.go") {
+		t.Errorf("expected matches in tracked-like files, got:\n%s", out)
+	}
+	if strings.Contains(out, "node_modules") {
+		t.Errorf("node_modules should be excluded via --exclude-standard, got:\n%s", out)
+	}
+}
+
+// TestGitGrep_NonGitDirectoryNoMatch verifies the no-match path in a non-git
+// dir returns the sentinel rather than an error.
+func TestGitGrep_NonGitDirectoryNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "", Mode: ModeWorkspace})
+
+	out, err := p.gitGrep(context.Background(), "nonexistentXYZ", false, false, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "No matches found" {
+		t.Errorf("expected 'No matches found', got: %q", out)
+	}
+}
+
+func TestCodeSearchProvider_Tool(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp"})
+	if p.Tool() != CodeSearch {
+		t.Errorf("Tool() = %v, want CodeSearch", p.Tool())
+	}
+}
+
+func TestCodeSearchProvider_Execute_BlankSearchText(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp"})
+	got, err := p.Execute(context.Background(), map[string]any{"search_text": "  "})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "Error: search_text is blank" {
+		t.Errorf("Execute() = %q, want blank error", got)
+	}
+}
+
+func TestCodeSearchProvider_Execute_Found(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+
+	got, err := p.Execute(context.Background(), map[string]any{
+		"search_text": "Hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "hello.go") {
+		t.Errorf("expected hello.go in result, got: %s", got)
+	}
+}
+
+func TestCodeSearchProvider_Execute_PropagatesGitFailure(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: "nonexistent_ref_abc123", Mode: ModeCommit})
+
+	got, err := p.Execute(context.Background(), map[string]any{
+		"search_text": "Hello",
+	})
+	if err == nil {
+		t.Fatal("expected git grep failure to propagate from Execute")
+	}
+	if got != "" {
+		t.Errorf("expected empty result on git grep failure, got: %s", got)
+	}
+	if !strings.Contains(err.Error(), "git grep failed") {
+		t.Errorf("expected git grep failure, got: %v", err)
+	}
+}
+
+func TestCodeSearchProvider_Execute_WithFilePatterns(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{name: "forward slash", pattern: "pkg/"},
+		{name: "backslash", pattern: "pkg\\"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := p.Execute(context.Background(), map[string]any{
+				"search_text":   "Util",
+				"file_patterns": []any{test.pattern},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, "util.go") {
+				t.Errorf("expected util.go for pattern %q, got: %s", test.pattern, got)
+			}
+		})
+	}
+}
+
+func TestCodeSearchProvider_Execute_RejectsTraversalPattern(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+	tests := []struct {
+		name    string
+		pattern string
+		want    string
+	}{
+		{name: "leading parent", pattern: "../pkg", want: "Error: file_patterns must not contain .."},
+		{name: "middle parent", pattern: "pkg/../internal", want: "Error: file_patterns must not contain .."},
+		{name: "trailing parent", pattern: "pkg/..", want: "Error: file_patterns must not contain .."},
+		{name: "leading parent backslash", pattern: `..\pkg`, want: "Error: file_patterns must not contain .."},
+		{name: "middle parent backslash", pattern: `pkg\..\internal`, want: "Error: file_patterns must not contain .."},
+		{name: "trailing parent backslash", pattern: `pkg\..`, want: "Error: file_patterns must not contain .."},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := p.Execute(context.Background(), map[string]any{
+				"search_text":   "Hello",
+				"file_patterns": []any{test.pattern},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Errorf("Execute() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCodeSearchProvider_Execute_AllowsDoubleDotInFilename(t *testing.T) {
+	dir := setupTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "foo..bar.go"), []byte("package main\n\nfunc DoubleDotName() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+	got, err := p.Execute(context.Background(), map[string]any{
+		"search_text":   "DoubleDotName",
+		"file_patterns": []any{"foo..bar.go"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "foo..bar.go") {
+		t.Errorf("expected foo..bar.go in result, got: %s", got)
+	}
+}
+
+func TestCodeSearchProvider_Execute_CaseSensitive(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+
+	got, err := p.Execute(context.Background(), map[string]any{
+		"search_text":    "hello",
+		"case_sensitive": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "Hello") {
+		t.Errorf("case-sensitive search for 'hello' should not match 'Hello', got: %s", got)
+	}
+}
+
+func TestCodeSearchProvider_Execute_PerlRegexp(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+
+	got, err := p.Execute(context.Background(), map[string]any{
+		"search_text":     "Hell\\w+",
+		"use_perl_regexp": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "hello.go") {
+		t.Errorf("expected hello.go in perl regexp result, got: %s", got)
+	}
+}
+
+func TestGitGrep_WithRunner(t *testing.T) {
+	dir := setupTestRepo(t)
+	runner := gitcmd.New(4)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace, Runner: runner})
+
+	result, err := p.gitGrep(context.Background(), "Hello", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "hello.go") {
+		t.Errorf("expected hello.go in result via Runner, got: %s", result)
+	}
+}
+
+func TestGitGrep_WithRunner_NoMatch(t *testing.T) {
+	dir := setupTestRepo(t)
+	runner := gitcmd.New(4)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace, Runner: runner})
+
+	result, err := p.gitGrep(context.Background(), "nonexistentXYZ", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "No matches found" {
+		t.Errorf("expected 'No matches found', got: %s", result)
+	}
+}
+
+func TestGitGrep_WithRunner_CommitMode(t *testing.T) {
+	dir := setupTestRepo(t)
+	commit := getHeadCommit(t, dir)
+	runner := gitcmd.New(4)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Ref: commit, Mode: ModeCommit, Runner: runner})
+
+	result, err := p.gitGrep(context.Background(), "Hello", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "hello.go") {
+		t.Errorf("expected hello.go in result via Runner commit mode, got: %s", result)
+	}
+}
+
+func TestGitGrep_Timeout(t *testing.T) {
+	dir := setupTestRepo(t)
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := p.gitGrep(ctx, "Hello", false, false, nil)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+		return
+	}
+	if !strings.Contains(result, "timed out") && !strings.Contains(result, "No matches found") {
+		t.Errorf("expected timeout or no matches message, got: %s", result)
+	}
+}
+
+// nonASCIIPath is committed by setupNonASCIIPathRepo. Git prints it as a
+// quoted octal escape unless core.quotepath is disabled.
+const nonASCIIPath = "src/café/文件.go" // allow-non-english: fixture exercises non-ASCII paths
+
+// setupNonASCIIPathRepo commits nonASCIIPath with core.quotepath forced on, so
+// tests do not depend on the user's global Git config, and returns the
+// repository and its HEAD commit.
+func setupNonASCIIPathRepo(t *testing.T) (string, string) {
+	t.Helper()
+	dir := setupTestRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("config", "core.quotepath", "true")
+	full := filepath.Join(dir, filepath.FromSlash(nonASCIIPath))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("package cafe\n\nfunc Needle() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "--", nonASCIIPath)
+	git("commit", "-q", "-m", "add non-ASCII path")
+	return dir, getHeadCommit(t, dir)
+}
+
+func TestGitGrep_NonASCIIPath(t *testing.T) {
+	dir, commit := setupNonASCIIPathRepo(t)
+	for _, tc := range []struct {
+		name string
+		mode ReviewMode
+		ref  string
+	}{
+		{name: "workspace", mode: ModeWorkspace},
+		{name: "commit", mode: ModeCommit, ref: commit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: tc.mode, Ref: tc.ref})
+			result, err := p.gitGrep(context.Background(), "Needle", true, false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "File: " + nonASCIIPath + "\n"; !strings.Contains(result, want) {
+				t.Errorf("expected %q in result, got: %s", want, result)
+			}
+		})
+	}
+}
+
+func TestBuildGrepArgs_NoIndex(t *testing.T) {
+	p := NewCodeSearch(&FileReader{RepoDir: "/tmp", Ref: ""})
+	args := p.buildGrepArgs("foo", false, false, true, nil)
+
+	assertContains(t, args, "--no-index")
+	assertContains(t, args, "--exclude-standard")
+	assertNotContains(t, args, "--untracked")
+}

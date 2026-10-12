@@ -1,0 +1,3247 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+"use strict";
+
+// OpenCodeReview PR review comment poster.
+//
+// Extracted from the inline actions/github-script step that used to live in
+// examples/github_actions/ocr-review.yml and .github/workflows/ocr-review.yml,
+// so that the reusable composite action (action/action.yml) and the in-repo
+// workflows share a single source of truth.
+//
+// Dependencies are injected by the caller (actions/github-script provides
+// `github`/`context`/`core`; `fs` is required by the caller). The module has
+// no external (npm) requires — only the Node.js built-in `crypto` — which
+// keeps it runnable inside actions/github-script without bundling.
+
+const crypto = require("crypto");
+
+const SUMMARY_MARKER = "<!-- ocr-summary -->";
+
+// Reason attached to comments that have no valid line range and therefore can
+// never be posted as inline comments. Surfaced in the summary via the same
+// `⚠️ GitHub could not post this as an inline comment: <reason>` line as
+// posting failures, so every summary-only comment explains why it is here.
+const NO_LINE_REASON = "No line information provided";
+
+// Default IoU threshold for the incremental multi-line overlap test. Two
+// multi-line comments are considered the same when their line-range
+// intersection-over-union exceeds this value. Exposed for tuning via the
+// incrementalOverlapThreshold option / incremental_overlap_threshold input.
+const DEFAULT_OVERLAP_THRESHOLD = 0.6;
+
+// Default maximum number of inline comments packed into a single createReview
+// call. Production once failed at 71 comments in one request (GitHub Server
+// Error after partial success); 50 stays at GitHub's documented soft guidance
+// for inline comments per review while keeping typical (sub-50) runs on a
+// single batch. Tunable via the reviewCommentBatchSize option /
+// review_comment_batch_size input.
+const DEFAULT_BATCH_SIZE = 50;
+
+// Enumerations for category/severity routing, sourced from the LLM output
+// schema (internal/config/toolsconfig/tools.json:55-84). Used both to validate
+// the routing policy and to normalize the metadata before comparison. Kept as
+// plain arrays (not Sets) so tests can inspect ordering for severity ranking.
+const CATEGORIES = [
+  "bug",
+  "security",
+  "performance",
+  "maintainability",
+  "test",
+  "style",
+  "documentation",
+  "other",
+];
+// Severity rank: higher = more severe. An unknown/empty severity has no rank
+// (never matched by the routing policy). Order matches the enum (critical is
+// the most severe, low the least).
+const SEVERITIES = ["critical", "high", "medium", "low"];
+const SEVERITY_RANK = new Map(
+  SEVERITIES.map((s, i) => [s, SEVERITIES.length - i])
+); // critical=4, high=3, medium=2, low=1
+
+// Sentinel policy object: "do not route anything". Returned by buildPolicy on
+// any parse problem so the partition loop falls open to today's behavior (I1).
+// Equivalently produced by an empty policy (no threshold, no categories).
+const NO_ROUTING = Object.freeze({ routeBySeverity: false, routeByCategory: false });
+
+// The documented resolve_outdated values. A Map, not an object literal: an
+// object lookup would inherit from Object.prototype, so 'constructor' or
+// 'toString' would resolve to a truthy non-string and silently read as
+// "configured" — the one direction this fail-closed feature must never fail.
+const RESOLVE_MODES = new Map([
+  ["true", "resolve"],
+  ["report", "report"],
+]);
+
+async function runPostReviewComments({
+  github,
+  context,
+  core,
+  fs,
+  // The pull request everything below posts to. action.yml resolves it before
+  // the review runs (pr_number input, then the event payload, then
+  // workflow_run.pull_requests[0]) because context.issue.number resolves
+  // nothing on a workflow_run. Omitting it keeps the event-derived number.
+  prNumber: prNumberOverride,
+  resultPath = "/tmp/ocr-result.json",
+  stderrPath = "/tmp/ocr-stderr.log",
+  stickySummary = true,
+  incremental = false,
+  incrementalOverlapThreshold = DEFAULT_OVERLAP_THRESHOLD,
+  reviewCommentBatchSize = DEFAULT_BATCH_SIZE,
+  // Fail-open finding-publication controls (#478). Both optional and empty by
+  // default: with neither set, behavior is byte-identical to today (modulo the
+  // additive badge prefix on rendered comments). buildPolicy parses them once
+  // before the partition loop and degrades to NO_ROUTING on any malformed value
+  // (fail-open for the policy itself, upholding I1).
+  routeSeverityBelow = "",
+  routeCategories = "",
+  // Cross-push checkpoints (#476). Off by default: with checkpointEnabled
+  // false and an empty carry, every emitted body is byte-identical to today's.
+  // checkpointCarry is the raw marker string the resolve step read from the
+  // existing summary; it is re-emitted verbatim on any run that does not
+  // advance, because the summary body is rewritten wholesale and would
+  // otherwise erase the checkpoint.
+  checkpointEnabled = false,
+  checkpointCarry = "",
+  checkpointBaseRef = "",
+  checkpointMergeBase = "",
+  checkpointFingerprint = "",
+  // True when the resolver reported same_head_noop: this run reviewed an empty
+  // range, so it has nothing to say and must not rewrite the existing summary.
+  checkpointNoop = false,
+  // What the resolver decided, for the human-visible range line on the summary.
+  rangeMode = "",
+  rangeFrom = "",
+  rangeTo = "",
+  // Outdated-thread resolution (#567). Opt-in, string-valued exactly like
+  // routeSeverityBelow: 'true' resolves, 'report' only logs what it would
+  // resolve, anything else (including the default) is a hard no-op that issues
+  // zero GraphQL calls.
+  resolveOutdated = "",
+}) {
+  const log = (msg) => {
+    if (core && typeof core.info === "function") core.info(msg);
+    else console.log(msg);
+  };
+  const out = (name, value) => {
+    if (core && typeof core.setOutput === "function") core.setOutput(name, value);
+  };
+
+  const owner = context.repo.owner;
+  const repo = context.repo.repo;
+  const prNumber =
+    prNumberOverride !== null && prNumberOverride !== undefined ? prNumberOverride : context.issue.number;
+
+  // Per-run idempotency tags. context.runId / context.runAttempt come from
+  // @actions/github's Context (parsed from GITHUB_RUN_ID / GITHUB_RUN_ATTEMPT).
+  // Number.isFinite guards against NaN when the env vars are missing, falling
+  // back to safe defaults. The tags are embedded in review/comment bodies as
+  // HTML comments so the idempotency check can detect whether a batch
+  // createReview actually landed on the server before retrying, which prevents
+  // duplicate review posts on retry.
+  const { RUN_TAG, REVIEW_TAG, SUMMARY_TAG } = buildRunTags(context.runId, context.runAttempt);
+
+  const stats = {
+    total: 0,
+    inline: 0,
+    skipped: 0,
+    failed: 0,
+    routed: 0,
+    resolved: 0,
+    resolvedPreview: 0,
+    summaryUrl: "",
+    checkpointAfter: "",
+  };
+  let outsideDiffCount = 0;
+
+  // Parsed here, before anything can exit early, even though it is only acted
+  // on after the posting loop. Unknown values fall to "off", which is the right
+  // default but an invisible one: a workflow that says 'True' or 'yes' would
+  // look configured and do nothing. Warning at the point of use would mean the
+  // typo stays silent on exactly the runs that hit an early exit — a clean PR
+  // or an unparseable result — which is most of them on a healthy repository.
+  // Empty/unset/'false' are the documented ways to be off, so they never warn.
+  const resolveMode = RESOLVE_MODES.get(resolveOutdated) ?? "off";
+  if (resolveMode === "off" && resolveOutdated && resolveOutdated !== "false") {
+    const msg =
+      `[resolve-outdated] ignoring unrecognized resolve_outdated value ${JSON.stringify(resolveOutdated)}; ` +
+      `expected 'false', 'report', or 'true'. Resolving nothing.`;
+    if (core && typeof core.warning === "function") core.warning(msg);
+    else log(msg);
+  }
+
+  // ---- Checkpoint write path (#476) ----
+  //
+  // The checkpoint may only move forward past a run that published everything
+  // it found: terminal_state "complete", no blocking posting failures, and a
+  // real 40-hex resolved head. Proven out-of-diff findings are published in the
+  // summary and do not block advancement. Other failures re-emit the marker
+  // this run started with, so an unrelated failure never silently resets the PR
+  // to full reviews, and never silently skips a range that was not reviewed.
+  //
+  // The fourth condition — the summary was actually published — is enforced in
+  // two places: structurally, because the marker lives INSIDE the summary body
+  // (a summary that never lands carries no checkpoint), and explicitly on the
+  // checkpoint_after output in setStatsOutputs.
+  //
+  // NOTE on terminal_state: per computeTerminal (internal/session/manifest.go:941)
+  // "complete" means nothing in the SELECTED set failed. Items the run waived or
+  // excluded before selection are inside that guarantee, so "complete" is
+  // completeness relative to what the run chose to review — the strongest signal
+  // the manifest offers, and the reason the checkpoint tracks the run's own
+  // resolved_head rather than the runner's HEAD_SHA.
+  const buildAdvanceMarker = (manifest) => {
+    stats.checkpointAfter = "";
+    if (!checkpointEnabled || !stickySummary) return null;
+    if (!manifest || manifest.terminal_state !== "complete") return null;
+    if (stats.failed !== outsideDiffCount) return null;
+    // No fingerprint means the resolve step fell over before it computed one
+    // (its catch path publishes an empty one). A marker without a fingerprint
+    // can never validate, so writing one here would only overwrite a usable
+    // marker with a dead one. Not advancing lets preserveCheckpointMarker keep
+    // the older, still-valid checkpoint — a wider next range, never a wrong one.
+    if (!checkpointFingerprint) return null;
+    const head = (manifest.input && manifest.input.resolved_head) || "";
+    if (!/^[0-9a-f]{40}$/.test(head)) return null;
+    stats.checkpointAfter = head;
+    return buildCheckpointMarker({
+      v: CHECKPOINT_VERSION,
+      pr: prNumber,
+      head,
+      base_ref: checkpointBaseRef,
+      merge_base: checkpointMergeBase,
+      terminal_state: "complete",
+      fingerprint: checkpointFingerprint,
+      run: String(context.runId != null ? context.runId : ""),
+    });
+  };
+  // Applied at every site that composes a summary body. Advancing supersedes the
+  // carry (a body must carry at most one marker); with neither, the body is
+  // exactly what it is today.
+  const appendCheckpoint = (body, manifest) => {
+    const marker = buildAdvanceMarker(manifest);
+    if (marker) return `${body}\n\n${marker}`;
+    // The carry is gated on the same two conditions as the advance. Without
+    // checkpointing there is nothing to carry; without a sticky summary each run
+    // posts a FRESH comment, so re-emitting a marker read from a previous run's
+    // comment would stamp a checkpoint onto a body that never carried one — and
+    // the resolver, which reads the newest summary, would then trust a head this
+    // run did not review.
+    if (!checkpointEnabled || !stickySummary) return body;
+    return checkpointCarry ? `${body}\n\n${checkpointCarry}` : body;
+  };
+  // Second line of defence behind the carry: when the carry is empty for a
+  // reason unrelated to the marker's usefulness, keep whatever marker the body
+  // being replaced already had (preserveCheckpointMarker).
+  const preserveMarker = checkpointEnabled && stickySummary;
+
+  // One human-visible line naming the range this run actually reviewed, so a
+  // reader of the summary is never left thinking the findings cover the whole
+  // PR. Only rendered when the range really was narrowed.
+  const rangeNote =
+    checkpointEnabled && rangeMode === "checkpoint" && rangeFrom && rangeTo && rangeFrom !== rangeTo
+      ? `\n\n_Reviewed \`${rangeFrom.slice(0, 7)}..${rangeTo.slice(0, 7)}\` only; earlier commits in this PR were reviewed in a previous run._`
+      : "";
+
+  // A rerun on the same head reviewed an empty range, so this run has nothing
+  // to say about the PR — and the sticky summary is rewritten wholesale, so
+  // saying it would replace the previous run's findings with "No comments
+  // generated" (or, if OCR tripped over the empty range, with an error banner).
+  // Checked before the output is even read: every path below writes.
+  if (checkpointNoop) {
+    log("[checkpoint] same head as the recorded checkpoint; leaving the existing summary in place.");
+    setStatsOutputs(out, stats);
+    return;
+  }
+
+  // Read OCR output.
+  let result;
+  try {
+    const raw = fs.readFileSync(resultPath, "utf8");
+    result = JSON.parse(raw);
+  } catch (e) {
+    log(`Failed to parse OCR output: ${e.message}`);
+    // stream_progress streams human-audience progress into stderr, so the file
+    // can dwarf GitHub's 65536-char comment limit; keep the tail, which is
+    // where the error that killed the run was written.
+    const stderr = tailForComment(safeRead(fs, stderrPath).trim());
+    if (stderr) {
+      // No manifest exists on this path (the output could not be parsed), so it
+      // can only ever carry the previous checkpoint forward — never advance it.
+      const body = appendCheckpoint(
+        `${SUMMARY_MARKER}\n⚠️ **OpenCodeReview** encountered an error:\n${fencedBlock(stderr)}`,
+        null
+      );
+      const posted = await postSummary({ github, owner, repo, prNumber, body, sticky: stickySummary, preserveMarker, log });
+      stats.summaryUrl = posted.url;
+    }
+    setStatsOutputs(out, stats);
+    return;
+  }
+
+  const comments = result.comments || [];
+  const warnings = result.warnings || [];
+  stats.total = comments.length;
+
+  // No comments: post a "looks good" summary.
+  //
+  // Outdated-thread resolution deliberately does NOT run here (nor at the
+  // parse-failure exit above). "The model reported nothing this run" is not
+  // evidence that previously-reported findings are gone — a truncated review, a
+  // model hiccup, or a diff the reviewer skipped all land on this exit, and any
+  // of them would otherwise close every open thread on the PR in one sweep.
+  // Resolution requires a run that actually produced findings.
+  if (comments.length === 0) {
+    const message = result.message || "No comments generated. Looks good to me.";
+    // A clean run is still a complete run: this path advances the checkpoint.
+    const body = appendCheckpoint(`${SUMMARY_MARKER}\n✅ **OpenCodeReview**: ${message}${rangeNote}`, result.manifest);
+    const posted = await postSummary({ github, owner, repo, prNumber, body, sticky: stickySummary, preserveMarker, log });
+    stats.summaryUrl = posted.url;
+    setStatsOutputs(out, stats);
+    return;
+  }
+
+  // Resolve the PR head commit sha to attach the review to.
+  let commitSha;
+  if (result.manifest != null) {
+    commitSha = result.manifest.input?.resolved_head;
+  } else if (context.eventName === "pull_request_target") {
+    commitSha = context.payload?.pull_request?.head?.sha;
+  } else {
+    throw new Error("OCR result manifest input.resolved_head is required to post inline comments for this event");
+  }
+  if (commitSha == null) {
+    throw new Error(result.manifest != null
+      ? "OCR result manifest input.resolved_head is missing; cannot post inline comments"
+      : "pull_request_target event payload.pull_request.head.sha is missing; cannot post inline comments");
+  }
+  if (typeof commitSha !== "string" || !/^[0-9a-f]{40}$/.test(commitSha)) {
+    throw new Error(
+      "Inline review commit SHA from manifest input.resolved_head or the pull_request_target event snapshot must be a 40-character lowercase string"
+    );
+  }
+
+  // Partition: inline (with valid line info) vs summary (without) vs routed
+  // (valid line but the publication policy moves it to the summary).
+  // Each inline comment gets a random per-comment ID (assigned once) embedded
+  // in its body as an HTML comment, so the retry/idempotency logic can detect
+  // whether a comment already landed on the server and avoid posting a
+  // duplicate. Random (not content-derived) so two distinct comments that
+  // share path/line/content still get different IDs.
+  //
+  // Routing is a placement decision in this loop, not a post-hoc filter: a
+  // finding the policy routes to summary is pushed to commentsRouted (mirroring
+  // commentsWithoutLine) instead of reviewComments. Routed findings therefore
+  // never enter reviewComments -> never enter toSend/toRetry -> never reach a
+  // createReview call (I4: no double-post surface on retry).
+  const policy = buildPolicy({ severityThreshold: routeSeverityBelow, categories: routeCategories });
+  const reviewComments = [];
+  const commentsWithoutLine = [];
+  const commentsRouted = [];
+  for (const comment of comments) {
+    const hasValidLine = comment.start_line >= 1 || comment.end_line >= 1;
+    if (!hasValidLine) {
+      commentsWithoutLine.push({ comment, body: formatComment(comment), reason: NO_LINE_REASON });
+      continue;
+    }
+    // Routing applies only to findings that COULD be posted inline (valid
+    // line). No-line findings already go to the summary via commentsWithoutLine,
+    // so they are never re-routed (avoids double-counting in the summary).
+    const route = routeComment(comment, policy);
+    if (route.routed) {
+      commentsRouted.push({ comment, body: formatComment(comment), reason: route.reason });
+      continue;
+    }
+    const id = newCommentId(RUN_TAG);
+    const reviewComment = { path: comment.path, body: formatComment(comment, id) };
+    if (comment.start_line >= 1 && comment.end_line >= 1 && comment.start_line !== comment.end_line) {
+      reviewComment.start_line = comment.start_line;
+      reviewComment.line = comment.end_line;
+      reviewComment.start_side = "RIGHT";
+      reviewComment.side = "RIGHT";
+    } else if (comment.end_line >= 1) {
+      reviewComment.line = comment.end_line;
+      reviewComment.side = "RIGHT";
+    } else if (comment.start_line >= 1) {
+      reviewComment.line = comment.start_line;
+      reviewComment.side = "RIGHT";
+    }
+    reviewComments.push({ comment, reviewComment, id });
+  }
+
+  // One lookup shared by both callers below (incremental dedupe and the resolve
+  // gate). Memoized on the PROMISE, so a run that needs it twice issues a single
+  // request — both paths used to call it, and under a token that 403s that meant
+  // two failed requests and two warning lines — while a run that needs it zero
+  // times still issues none.
+  //
+  // The resolve caller looks dead, because botLogin is null under every Actions
+  // token, and it is not. Under a PAT, getAuthenticated() succeeds and returns
+  // the human's login, and shouldResolveThread's `!rootIsBot && rootLogin !==
+  // botLogin` branch is the only thing separating "our own comment, posted via
+  // PAT" from "a human quoting our marker". Drop this call and the feature
+  // silently resolves nothing on every PAT run.
+  let authenticatedLoginPromise = null;
+  const authenticatedLogin = () => {
+    if (!authenticatedLoginPromise) authenticatedLoginPromise = getAuthenticatedLogin(github, log);
+    return authenticatedLoginPromise;
+  };
+
+  // Incremental filtering (non-destructive): drop current inline comments
+  // whose (path, line range) overlaps an existing bot review comment, so we
+  // only append comments on lines not yet covered. History is never deleted.
+  let toSend = reviewComments;
+  if (incremental && reviewComments.length > 0) {
+    const existing = await listExistingReviewComments(github, owner, repo, prNumber, log);
+    const botLogin = await authenticatedLogin();
+    const hist = existing.filter((c) => isBotComment(c, botLogin));
+    toSend = reviewComments.filter(
+      ({ reviewComment }) => !overlapsHistory(reviewComment, hist, incrementalOverlapThreshold)
+    );
+
+    const deduped = [];
+    const acceptedComments = [];
+    for (const item of toSend) {
+      if (overlapsComments(item.reviewComment, acceptedComments, incrementalOverlapThreshold)) {
+        continue;
+      }
+      acceptedComments.push(item.reviewComment);
+      deduped.push(item);
+    }
+
+    toSend = deduped;
+    stats.skipped = reviewComments.length - toSend.length;
+    if (stats.skipped > 0) {
+      log(`[incremental] skipped ${stats.skipped} overlapping comment(s); ${toSend.length} to post.`);
+    }
+  }
+
+  // ---- Summary anchor (before the review) ----
+  // Create the summary issue comment BEFORE posting the review so that on a
+  // cold start (the first review on this PR) the summary's timeline position is
+  // above the review. GitHub orders issue comments oldest-first, so creating
+  // the summary first pins it at the top; later runs merely update it in place
+  // (sticky) or post a fresh per-run comment (non-sticky), so the ordering
+  // stays stable and the summary is never sandwiched between review blocks.
+  // The anchor carries a pre-review body (issue count, warnings, and comments
+  // without line info — all known upfront); final posting statistics are
+  // written in the finalize phase below, once the review has landed.
+  const wrapSummary = (content) => `${SUMMARY_MARKER}\n${SUMMARY_TAG}\n${content}`;
+  const anchor = await ensureSummaryAnchor({
+    github,
+    owner,
+    repo,
+    prNumber,
+    sticky: stickySummary,
+    tag: SUMMARY_TAG,
+    body: wrapSummary(
+      buildPreReviewSummaryBody(stats.total, commentsWithoutLine, commentsRouted, warnings)
+    ),
+    log,
+  });
+
+  // Submit inline comments (the to-send set) as one or more PR reviews.
+  let successCount = 0;
+  let failedCount = 0;
+  const failedComments = [];
+
+  // Sort before partitioning so identical reruns produce identical batches
+  // (B2/AS4): a partial-success retry reproduces the same partition, which is
+  // what makes per-batch reconciliation against already-posted fence IDs work.
+  const batchSize = resolveBatchSize(reviewCommentBatchSize);
+  const sorted = sortToSendDeterministically(toSend);
+  const batches = chunkArray(sorted, batchSize);
+  const batchCounters = { total: batches.length, attempted: 0, succeeded: 0, reconciled: 0 };
+
+  if (toSend.length > 0) {
+    // The summary lives in its own issue comment (anchored above), so the
+    // review body carries only the per-run REVIEW_TAG. The tag lets the
+    // idempotency check locate the batch review on retry (a batch createReview
+    // may have landed on the server even though we received a 5xx response).
+    const reviewBody = REVIEW_TAG;
+
+    // Shared across batches so the PR's diff inventory is fetched at most once
+    // per run even if several batches trip the 422 line-resolution fallback.
+    const diffCache = {};
+
+    for (const chunk of batches) {
+      const r = await publishBatch({
+        chunk,
+        github,
+        owner,
+        repo,
+        prNumber,
+        commitSha,
+        reviewBody,
+        REVIEW_TAG,
+        log,
+        diffCache,
+      });
+      successCount += r.succeeded;
+      failedCount += r.failed;
+      outsideDiffCount += r.failedComments.filter((fc) => fc.outsideDiff === true).length;
+      for (const fc of r.failedComments) failedComments.push(fc);
+      batchCounters.attempted++;
+      if (r.reconciled) batchCounters.reconciled++;
+      if (r.succeeded > 0) batchCounters.succeeded++;
+    }
+  } else {
+    log("No inline comments to post after filtering (all overlapping or none had line info).");
+  }
+
+  stats.inline = successCount;
+  stats.failed = failedCount;
+  stats.routed = commentsRouted.length;
+
+  // ---- Finalize the summary with the complete body ----
+  // Now that the review has landed (or failed per-comment), write the final
+  // summary body. Posting statistics are merged into the leading summary
+  // header (see buildSummaryBody), so here we only append the per-comment
+  // renderings: every comment that did not go out as inline — whether because
+  // it had no line info, was routed by the publication policy, or because
+  // posting failed — is rendered as one continuous block, each carrying the
+  // reason it ended up in the summary (so the reader always knows why it is
+  // here). Routed findings render BEFORE the failed block so the order is:
+  // counts → no-line summary → routed summary → failed.
+  let summaryBody = buildSummaryBody({
+    total: stats.total,
+    inline: successCount,
+    summary: commentsWithoutLine.length,
+    skipped: stats.skipped,
+    routed: commentsRouted.length,
+    failed: failedCount,
+    warnings,
+  });
+  summaryBody += formatSummaryComments(commentsWithoutLine);
+  summaryBody += formatSummaryComments(commentsRouted);
+  for (const { comment, error } of failedComments) {
+    summaryBody += "\n\n---\n\n";
+    summaryBody += formatCommentMarkdown(comment, error);
+  }
+  if (toSend.length === 0 && stats.skipped > 0) {
+    summaryBody += "\n\n---\n\nℹ️ All inline comments overlapped with existing reviews; nothing new was posted.";
+  }
+  summaryBody += formatWarnings(warnings);
+  summaryBody += rangeNote;
+
+  // Update the anchored comment directly when its id is known (no extra read);
+  // otherwise upsert (find-then-update-or-create), which also covers the case
+  // where the anchor phase was skipped because the read API was unavailable.
+  // Returns null only when the summary could not be written without risking a
+  // duplicate; the review content remains available via inline comments.
+  const finalized = await finalizeSummary({
+    github,
+    owner,
+    repo,
+    prNumber,
+    anchor,
+    sticky: stickySummary,
+    tag: SUMMARY_TAG,
+    body: wrapSummary(appendCheckpoint(summaryBody, result.manifest)),
+    preserveMarker,
+    log,
+  });
+  if (finalized) stats.summaryUrl = finalized.url;
+
+  // ---- Resolve our own outdated threads (#567) ----
+  // Reachable only from here: both earlier exits (unparseable output, zero
+  // findings) return before this point on purpose. The gate is therefore
+  // positional and exact — "this run parsed >= 1 finding AND completed the
+  // posting loop". Findings that never went out as inline comments (suppressed
+  // by incremental dedupe, routed to the summary, or failed to post) still
+  // count towards the gate AND still veto resolution of a thread on their own
+  // lines, which is why currentSpans is built from the raw parsed findings
+  // rather than from `toSend`: a finding we chose not to repeat is still a
+  // finding that is live.
+  if (resolveMode !== "off") {
+    const currentSpans = comments.map((c) => ({
+      path: c.path,
+      start_line: c.start_line,
+      line: c.end_line,
+    }));
+    // Cleanup must never cost the run its outputs. resolveOutdatedThreads
+    // catches its own expected failures, but an unexpected throw here (a mock,
+    // an Octokit shape change, a network layer rejecting outside the mutation
+    // loop) would otherwise abort runPostReviewComments before
+    // setStatsOutputs, leaving every comments_* output unset for downstream
+    // steps — a far worse outcome than not resolving a stale thread.
+    try {
+      const r = await resolveOutdatedThreads({
+        github,
+        owner,
+        repo,
+        prNumber,
+        core,
+        log,
+        botLogin: await authenticatedLogin(),
+        currentSpans,
+        dryRun: resolveMode === "report",
+      });
+      stats.resolved = r.resolved;
+      // The full candidate count, not `attempted`: report mode exists to show
+      // how much work 'true' would find, and attempted is clamped to
+      // MAX_RESOLVE_PER_RUN, so a 60-thread backlog previewed as "50".
+      stats.resolvedPreview = resolveMode === "report" ? r.candidates : 0;
+    } catch (e) {
+      const msg = `[resolve-outdated] cleanup failed unexpectedly (${e.message}); the review itself is unaffected.`;
+      if (core && typeof core.warning === "function") core.warning(msg);
+      else log(msg);
+    }
+  }
+
+  setStatsOutputs(out, stats, batchCounters, batchSize);
+}
+
+// Publish a single bounded batch of inline comments via one createReview call,
+// then reconcile + per-comment-retry on failure. This is the per-batch body of
+// the previous all-in-one publish block, factored out so it can run once per
+// chunk. The reconciliation/idempotency logic is unchanged: the only behavioral
+// difference is that it operates on `chunk` (a slice of the sorted toSend) and
+// returns its counts/failed-list so the caller can accumulate them across
+// batches (B3/B4/B5/B6).
+//
+// Returns { succeeded, failed, failedComments, reconciled }.
+//   - succeeded: comments in this batch that ended up on the server (posted by
+//     the batch call, or reconciled-already-posted, or per-comment retry).
+//   - failed: comments that could not be posted AND could not be reconciled.
+//   - reconciled: true if the batch call failed and at least one of this
+//     batch's comments was proven already-posted (idempotency read succeeded).
+async function publishBatch({
+  chunk,
+  github,
+  owner,
+  repo,
+  prNumber,
+  commitSha,
+  reviewBody,
+  REVIEW_TAG,
+  log,
+  diffCache,
+}) {
+  let succeeded = 0;
+  let failed = 0;
+  const failedComments = [];
+  let reconciled = false;
+
+  try {
+    const batchRes = await github.rest.pulls.createReview({
+      owner,
+      repo,
+      pull_number: prNumber,
+      commit_id: commitSha,
+      body: reviewBody,
+      event: "COMMENT",
+      comments: chunk.map(({ reviewComment }) => reviewComment),
+    });
+    succeeded = chunk.length;
+    log(`Successfully posted review batch with ${succeeded} inline comment(s).`);
+    logRateLimitQuota(batchRes, "after batch createReview", log);
+  } catch (e) {
+    log(`Failed to post review batch with ${chunk.length} inline comment(s): ${e.message}`);
+
+    // Retry/pacing configuration (shared by write and read API calls).
+    // parseNonNegInt guards against nonsensical env values (negative, NaN,
+    // non-numeric) that `parseInt(...) || default` would let through for
+    // negative numbers, since a negative parseInt result is truthy and would
+    // bypass the `|| default` fallback. These are re-read here (not threaded
+    // through a config bag) to keep this helper a behavior-preserving move of
+    // the existing catch block — scoping config to only the batch size would
+    // silently drop per-comment pacing.
+    const MAX_RETRIES = parseNonNegInt(process.env.OCR_MAX_RETRIES, 3);
+    const SUCCESS_DELAY = parseNonNegInt(process.env.OCR_SUCCESS_DELAY, 2000);
+    const FAILURE_DELAY = parseNonNegInt(process.env.OCR_FAILURE_DELAY, 1000);
+    const LOW_REMAINING_THRESHOLD = parseNonNegInt(process.env.OCR_LOW_REMAINING_THRESHOLD, 3);
+    const LOW_REMAINING_SPACING = parseNonNegInt(process.env.OCR_LOW_REMAINING_SPACING, 10000);
+    // Note: read-API pacing (OCR_READ_SUCCESS_DELAY / OCR_READ_LOW_REMAINING_SPACING)
+    // is handled internally by readWithPacing() for the read calls below
+    // (findExistingBatchReview / getPostedCommentIds / isCommentAlreadyPosted),
+    // so it is not read here — only the write-path pacing knobs are.
+
+    // Rate-limit cooldown + idempotency reconciliation, both handled by
+    // cooldownAndReconcile(). The SAME helper runs for the secondary filtered
+    // batch below, so the two write paths cannot drift apart: every batch-level
+    // failure honors the error's retry/rate-limit headers before any further API
+    // call, and every failure that MAY have reached the server is reconciled
+    // against what actually landed before we retry anything.
+    const primary = await cooldownAndReconcile({
+      github,
+      owner,
+      repo,
+      prNumber,
+      log,
+      error: e,
+      items: chunk,
+      tag: REVIEW_TAG,
+      label: "Batch",
+      labelLower: "batch",
+    });
+    let toRetry = primary.toRetry;
+    succeeded += primary.alreadyPosted;
+    reconciled = primary.reconciled;
+    for (const { item, error } of primary.unverified) {
+      failed++;
+      failedComments.push({ comment: item.comment, error });
+    }
+    const batchStatus = primary.status;
+
+    // ---- HTTP 422 line-resolution fallback -------------------------------
+    // GitHub rejects a whole createReview batch when ANY inline comment points
+    // at a line outside the PR diff. Rather than degrading straight to N
+    // separate per-comment reviews (N timeline entries — the churn issue #624
+    // is about), drop the comments we can PROVE are unresolvable and re-send
+    // the survivors as one review.
+    //
+    // Two guards keep this from making things worse:
+    //   * isLineResolutionFailure() — a 422 from this endpoint means
+    //     "Validation failed, OR the endpoint has been spammed". Only a
+    //     confirmed line/diff validation error activates the fallback; an
+    //     unrecognized 422 (including spam/abuse detection) falls straight
+    //     through to the per-comment loop, which has its own retry discipline.
+    //     Re-sending a batch into a spam-throttled endpoint would deepen the
+    //     incident rather than fix it.
+    //   * classifyCommentAgainstDiff() distinguishes malformed locations from
+    //     locations proven outside the diff. Only the latter can advance a
+    //     checkpoint. "unknown" (incomplete file list, omitted patch data,
+    //     LEFT-side comment, no line info) keeps
+    //     the pre-existing per-comment behavior instead of silently voiding a
+    //     comment that might well post.
+    if (batchStatus === 422 && toRetry.length > 0 && isLineResolutionFailure(e)) {
+      log(`[422-fallback] Batch createReview rejected by line/diff validation (HTTP 422). Filtering unresolvable comments against PR diff hunks...`);
+      let diff = null;
+      try {
+        diff = await getPrDiffHunks({
+          github,
+          owner,
+          repo,
+          prNumber,
+          commitSha,
+          log,
+          cache: diffCache,
+        });
+      } catch (hunkErr) {
+        log(`[422-fallback] Failed to fetch PR diff hunks (${hunkErr.message}); proceeding without diff hunk filter.`);
+      }
+
+      // valid        -> provably inside the diff, safe to re-batch
+      // unknown      -> cannot prove either way, try the per-comment loop
+      // outside_diff -> route to the summary without blocking the checkpoint
+      // malformed    -> route to the summary and keep the checkpoint blocked
+      const validItems = [];
+      const unknownItems = [];
+      for (const item of toRetry) {
+        const verdict = classifyCommentAgainstDiff(item, diff);
+        if (verdict === "valid") {
+          validItems.push(item);
+        } else if (verdict === "unknown") {
+          unknownItems.push(item);
+        } else {
+          failed++;
+          const outsideDiff = verdict === "outside_diff";
+          const reason = outsideDiff ? "outside PR diff hunks" : "malformed comment location";
+          failedComments.push({
+            comment: item.comment,
+            error: `${describeCommentLocation(item.reviewComment)} could not be resolved (${reason})`,
+            // Only proven placement limitations qualify; malformed metadata
+            // remains blocking even though its finding is also in the summary.
+            outsideDiff,
+          });
+          log(`[422-fallback] Comment for ${item.reviewComment.path} (${describeCommentLocation(item.reviewComment)}) could not be resolved (${reason}); routing to summary failure.`);
+        }
+      }
+      if (unknownItems.length > 0) {
+        log(`[422-fallback] ${unknownItems.length} comment(s) could not be checked against the diff (incomplete or unavailable patch data); posting them individually rather than discarding them.`);
+      }
+
+      // A secondary batch is only worth sending if filtering actually removed
+      // something. If every comment survived classification, the payload would
+      // be byte-identical to the one GitHub just rejected (validItems preserves
+      // toRetry's order), so the resend is guaranteed to fail the same way — a
+      // wasted write into an endpoint that just returned 422, which is exactly
+      // what the spam-throttle reasoning above says to avoid. This is reachable
+      // whenever our view of the diff disagrees with GitHub's: `commitSha` is
+      // the head SHA captured at trigger time, while getPrDiffHunks reports the
+      // PR's CURRENT diff, so a push landing in between makes GitHub reject
+      // lines that our classifier still considers valid.
+      const filteredSomething = validItems.length < toRetry.length;
+      if (validItems.length > 0 && filteredSomething) {
+        log(`[422-fallback] Attempting secondary filtered batch createReview with ${validItems.length} valid comment(s)...`);
+        try {
+          const secondaryRes = await github.rest.pulls.createReview({
+            owner,
+            repo,
+            pull_number: prNumber,
+            commit_id: commitSha,
+            body: reviewBody,
+            event: "COMMENT",
+            comments: validItems.map(({ reviewComment }) => reviewComment),
+          });
+          succeeded += validItems.length;
+          log(`Successfully posted secondary filtered review batch with ${validItems.length} inline comment(s).`);
+          logRateLimitQuota(secondaryRes, "after secondary batch createReview", log);
+          toRetry = unknownItems;
+        } catch (secondaryE) {
+          log(`Secondary filtered batch createReview failed (HTTP ${secondaryE.status || "n/a"}): ${secondaryE.message}. Falling back to per-comment loop.`);
+          // Same cooldown + idempotency discipline as the primary batch: a 5xx
+          // or network error can mean the secondary review LANDED and only the
+          // response was lost, in which case dropping straight into the
+          // per-comment loop would repost every surviving comment.
+          const secondary = await cooldownAndReconcile({
+            github,
+            owner,
+            repo,
+            prNumber,
+            log,
+            error: secondaryE,
+            items: validItems,
+            tag: REVIEW_TAG,
+            label: "Secondary filtered batch",
+            labelLower: "secondary filtered batch",
+          });
+          succeeded += secondary.alreadyPosted;
+          if (secondary.reconciled) reconciled = true;
+          for (const { item, error } of secondary.unverified) {
+            failed++;
+            failedComments.push({ comment: item.comment, error });
+          }
+          toRetry = secondary.toRetry.concat(unknownItems);
+        }
+      } else {
+        if (validItems.length > 0) {
+          log(
+            `[422-fallback] Classification cleared all ${validItems.length} remaining comment(s), so a ` +
+              `filtered batch would be identical to the one GitHub just rejected; skipping the secondary ` +
+              `batch and going straight to the per-comment fallback.`
+          );
+        }
+        // NOTE: validItems must be carried here, not dropped. Falling back to
+        // `toRetry = unknownItems` alone would silently discard every comment
+        // that passed classification.
+        toRetry = validItems.concat(unknownItems);
+      }
+
+      if (toRetry.length === 0) {
+        log(`[422-fallback] No comments remain for the per-comment fallback.`);
+        return { succeeded, failed, failedComments, reconciled };
+      }
+    }
+
+    for (const { comment, reviewComment, id } of toRetry) {
+      let posted = false;
+      for (let attempt = 0; attempt <= MAX_RETRIES && !posted; attempt++) {
+        try {
+          const res = await github.rest.pulls.createReview({
+            owner,
+            repo,
+            pull_number: prNumber,
+            commit_id: commitSha,
+            body: "",
+            event: "COMMENT",
+            comments: [reviewComment],
+          });
+          succeeded++;
+          posted = true;
+          log(`Successfully posted comment for ${reviewComment.path}`);
+          // Proactive throttle: if remaining quota is low, slow down to
+          // avoid hitting the limit (GitHub best practice: watch the header).
+          const remaining = logRateLimitQuota(res, `after ${reviewComment.path}`, log);
+          const lowQuota = remaining != null && remaining <= LOW_REMAINING_THRESHOLD;
+          if (lowQuota) {
+            log(`[rate-limit] quota low (remaining=${remaining} <= ${LOW_REMAINING_THRESHOLD}); increasing spacing to ${LOW_REMAINING_SPACING}ms.`);
+            await sleep(LOW_REMAINING_SPACING);
+          } else {
+            await sleep(SUCCESS_DELAY);
+          }
+        } catch (innerE) {
+          // Decide whether to retry and how long to wait, based on GitHub's
+          // rate-limit documentation (retry-after / x-ratelimit-* headers).
+          const retryInfo = computeRetryDelayMs(innerE, attempt);
+          const willRetry = retryInfo != null && attempt < MAX_RETRIES;
+          // Any error whose request may have reached GitHub (5xx server
+          // errors, 408 timeout, or network-layer errors with no status) can
+          // mean the comment was actually created but the response was lost.
+          // Before retrying (which would post a duplicate) or before giving
+          // up (which would wrongly list it as failed in the summary), check
+          // whether it already landed.
+          //
+          // IMPORTANT: do the check AFTER cooling down, not immediately. If
+          // the error is rate-limit-related (5xx under load, or a network
+          // blip), firing read requests right away further pressures the
+          // already-struggling API. Honor the computed retry delay first,
+          // then query.
+          const status = innerE.status;
+          const maybeReachedServer =
+            (typeof status === "number" && (status >= 500 || status === 408)) ||
+            status == null; // network errors (ECONNRESET, ETIMEDOUT, ...)
+          if (maybeReachedServer) {
+            // Cool down first: even read requests count against rate limits,
+            // and querying during an ongoing 5xx/rate-limit episode can
+            // worsen the situation. Use the retry delay when available; for
+            // non-retryable errors (retryInfo == null) there is no
+            // header-derived wait, so use a short fixed cool down before the
+            // read.
+            const coolDownMs = retryInfo != null ? retryInfo.delayMs : FAILURE_DELAY;
+            if (coolDownMs > 0) {
+              const secs = (coolDownMs / 1000).toFixed(1);
+              log(
+                `Cooling down ${secs}s before idempotency check for ${reviewComment.path} ` +
+                  `(HTTP ${innerE.status || "n/a"}, attempt ${attempt + 1}/${MAX_RETRIES + 1}).`
+              );
+              await sleep(coolDownMs);
+            }
+            const alreadyPosted = await isCommentAlreadyPosted({ github, owner, repo, prNumber, id, log });
+            if (alreadyPosted === true) {
+              succeeded++;
+              posted = true;
+              log(`Comment for ${reviewComment.path} already posted (id=${id}); treating as success.`);
+              await sleep(SUCCESS_DELAY);
+              continue;
+            }
+            // Unknown (null): the read API is unavailable, so we cannot tell
+            // whether the comment landed. To avoid a duplicate, do NOT retry
+            // posting; record as failed so the summary surfaces the
+            // uncertainty rather than silently risking a duplicate.
+            if (alreadyPosted === null) {
+              failed++;
+              const reason = "idempotency check unavailable (read API failed)";
+              failedComments.push({ comment, error: `${innerE.message} [${reason}]` });
+              log(`Cannot verify whether comment for ${reviewComment.path} was posted (${reason}, HTTP ${innerE.status || "n/a"}); skipping retry to avoid duplicate.`);
+              await sleep(SUCCESS_DELAY);
+              break;
+            }
+            // Not found on server. If retries are exhausted or the error is
+            // non-retryable, this is a real failure.
+            if (!willRetry) {
+              failed++;
+              failedComments.push({ comment, error: innerE.message });
+              const reason = retryInfo == null ? "non-retryable error" : "rate-limit retries exhausted";
+              log(`Failed to post comment for ${reviewComment.path} (${reason}, HTTP ${innerE.status || "n/a"}): ${innerE.message}`);
+              await sleep(SUCCESS_DELAY);
+              break;
+            }
+            // willRetry: cool down already consumed above, loop back.
+          } else if (willRetry) {
+            // Pure 429/403 rate-limit: the request never reached the server,
+            // so no duplicate is possible and the idempotency check can be
+            // skipped. Just honor the retry delay.
+            const secs = (retryInfo.delayMs / 1000).toFixed(1);
+            log(
+              `Rate-limited on ${reviewComment.path} ` +
+                `(HTTP ${innerE.status}, attempt ${attempt + 1}/${MAX_RETRIES}). ` +
+                `Waiting ${secs}s via '${retryInfo.source}' (${retryInfo.detail}). ` +
+                `Error: ${innerE.message}`
+            );
+            await sleep(retryInfo.delayMs);
+          } else {
+            // Non-retryable error that definitely did not reach the server
+            // (e.g. 4xx validation error): record as failed.
+            failed++;
+            failedComments.push({ comment, error: innerE.message });
+            log(`Failed to post comment for ${reviewComment.path} (non-retryable error, HTTP ${innerE.status || "n/a"}): ${innerE.message}`);
+            await sleep(FAILURE_DELAY);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return { succeeded, failed, failedComments, reconciled };
+}
+
+// Build the per-run idempotency tags from the GitHub Actions run identity.
+// runId / runAttempt come from @actions/github's Context (GITHUB_RUN_ID /
+// GITHUB_RUN_ATTEMPT); Number.isFinite guards against NaN when the env vars are
+// missing, falling back to safe defaults. REVIEW_TAG is the body marker the
+// batch createReview carries so findExistingBatchReview can locate a batch that
+// landed despite a 5xx; SUMMARY_TAG is the analogous marker for the summary
+// issue comment. Pure so it can be tested and reused.
+function buildRunTags(runId, runAttempt) {
+  const id = Number.isFinite(runId) ? runId : 0;
+  const attempt = Number.isFinite(runAttempt) ? runAttempt : 1;
+  const RUN_TAG = `${id}-${attempt}`;
+  return {
+    RUN_TAG,
+    REVIEW_TAG: `<!-- ocr-review-run:${RUN_TAG} -->`,
+    SUMMARY_TAG: `<!-- ocr-summary-run:${RUN_TAG} -->`,
+  };
+}
+
+// Resolve the configured batch size. A batch size is a positive integer (N>=1):
+// 0, negatives, NaN, and non-numeric strings all fall back to the default.
+// Mirrors the parseNonNegInt discipline but with a lower bound of 1, since a
+// zero-size batch would be nonsensical (B1).
+function resolveBatchSize(raw) {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : DEFAULT_BATCH_SIZE;
+}
+
+// Deterministically order the toSend set before partitioning so identical
+// inputs produce identical batches across reruns (B2/AS4). Returns a NEW array
+// (does not mutate the caller's array). Sort key: path → start_line → end_line
+// → original array index. The explicit original-index tiebreak guarantees
+// stable ordering even for same-file same-line findings, on engines where
+// Array.prototype.sort stability would otherwise be incidental. Severity/
+// category ordering is intentionally absent — comment objects carry no such
+// fields (verified at the call site), and adding them is a cross-cutting schema
+// change explicitly out of scope (sibling issue #478).
+function sortToSendDeterministically(items) {
+  return items
+    .map((item, origIndex) => ({ item, origIndex }))
+    .sort((a, b) => {
+      const ca = a.item.comment;
+      const cb = b.item.comment;
+      const byPath = String(ca.path).localeCompare(String(cb.path));
+      if (byPath !== 0) return byPath;
+      const byStart = (ca.start_line || 0) - (cb.start_line || 0);
+      if (byStart !== 0) return byStart;
+      const byEnd = (ca.end_line || 0) - (cb.end_line || 0);
+      if (byEnd !== 0) return byEnd;
+      return a.origIndex - b.origIndex;
+    })
+    .map(({ item }) => item);
+}
+
+// Partition a sorted array into contiguous slices of at most `size` items
+// (B1/AS2/AS3). Contiguity + sorted input ⇒ deterministic partition: the last
+// slice is the remainder (length === size when items.length is a multiple of
+// size, otherwise items.length mod size).
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function setStatsOutputs(out, stats, batchCounters, batchSize) {
+  out("comments_total", String(stats.total));
+  out("comments_inline", String(stats.inline));
+  out("comments_skipped", String(stats.skipped));
+  out("comments_routed", String(stats.routed));
+  out("comments_failed", String(stats.failed));
+  // Emitted on every exit (always "0" when resolve_outdated is off or in
+  // 'true' mode respectively) so a consumer workflow can read them
+  // unconditionally instead of testing for their existence.
+  out("comments_resolved", String(stats.resolved));
+  out("comments_resolved_preview", String(stats.resolvedPreview));
+  out("summary_comment_url", stats.summaryUrl || "");
+  // The head this run's checkpoint advanced to, or "" when it did not advance
+  // (#476). Gated on summaryUrl because the marker lives inside the summary
+  // comment: a summary that never published carries no checkpoint, so claiming
+  // one on the output would lie to the caller.
+  out("checkpoint_after", stats.summaryUrl && stats.checkpointAfter ? stats.checkpointAfter : "");
+  // Per-batch telemetry (B7). These are additional outputs; the five above are
+  // unchanged so existing consumers of comments_* / summary_comment_url are
+  // unaffected. batch_summary is a single JSON string so a fleet dashboard can
+  // read one value instead of correlating multiple scalars.
+  if (batchCounters) {
+    out("batches_total", String(batchCounters.total));
+    out("batches_attempted", String(batchCounters.attempted));
+    out("batches_succeeded", String(batchCounters.succeeded));
+    out("batches_reconciled", String(batchCounters.reconciled));
+    out(
+      "batch_summary",
+      JSON.stringify({
+        total: batchCounters.total,
+        attempted: batchCounters.attempted,
+        succeeded: batchCounters.succeeded,
+        reconciled: batchCounters.reconciled,
+        batch_size: batchSize != null ? batchSize : DEFAULT_BATCH_SIZE,
+        inline: stats.inline,
+        failed: stats.failed,
+      })
+    );
+  }
+}
+
+// ---- Summary posting (sticky vs new) ----
+
+async function postSummary({ github, owner, repo, prNumber, body, sticky, preserveMarker = false, log }) {
+  const fullBody = body;
+  if (sticky) {
+    const existing = await findExistingSummaryComment({ github, owner, repo, prNumber, log });
+    if (existing) {
+      const { data: updated } = await github.rest.issues.updateComment({
+        owner,
+        repo,
+        comment_id: existing.id,
+        body: preserveMarker ? preserveCheckpointMarker(fullBody, existing.body) : fullBody,
+      });
+      return { id: updated.id, url: updated.html_url, updated: true };
+    }
+  }
+  const { data: created } = await github.rest.issues.createComment({
+    owner,
+    repo,
+    issue_number: prNumber,
+    body: fullBody,
+  });
+  return { id: created.id, url: created.html_url, updated: false };
+}
+
+async function findExistingSummaryComment({ github, owner, repo, prNumber, log }) {
+  const comments = await readAllPages("listIssueComments", (page, per_page) =>
+    github.rest.issues.listComments({ owner, repo, issue_number: prNumber, per_page, page }), log
+  );
+  // Issue comments are returned oldest-first; pick the newest matching.
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const body = comments[i].body;
+    if (typeof body === "string" && body.includes(SUMMARY_MARKER)) {
+      return comments[i];
+    }
+  }
+  return null;
+}
+
+// ---- Summary anchor + finalize (cold-start ordering) ----
+//
+// The summary issue comment is created BEFORE the review so that on a cold
+// start (first review on the PR) it lands above the review in the timeline
+// (GitHub orders issue comments oldest-first). It is then updated in place
+// with the final body once the review has posted. This keeps the summary from
+// being sandwiched between review blocks on subsequent sticky runs.
+
+// Find the issue comment that should carry the summary, or null if none.
+// Sticky matches the persistent cross-run marker (SUMMARY_MARKER); non-sticky
+// matches this run's tag (SUMMARY_TAG) so each run gets its own comment while
+// retries within a run reuse it. Throws on read failure so callers can degrade.
+async function findSummaryIssueComment({ github, owner, repo, prNumber, sticky, tag, log }) {
+  const comments = await readAllPages("listIssueComments", (page, per_page) =>
+    github.rest.issues.listComments({ owner, repo, issue_number: prNumber, per_page, page }), log
+  );
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const body = comments[i].body || "";
+    if (sticky ? body.includes(SUMMARY_MARKER) : body.includes(tag)) {
+      return comments[i];
+    }
+  }
+  return null;
+}
+
+// Phase 1 (before review): create a summary comment only if none exists yet, so
+// its timeline position is pinned above the not-yet-posted review. Returns
+// { id, url } for the existing/created comment, or null when the existence
+// check fails (read API unavailable) — callers then defer to finalizeSummary.
+async function ensureSummaryAnchor({ github, owner, repo, prNumber, body, sticky, tag, log }) {
+  let existing = null;
+  try {
+    existing = await findSummaryIssueComment({ github, owner, repo, prNumber, sticky, tag, log });
+  } catch (e) {
+    log(`[summary] cannot check for existing summary before review (${e.message}); skipping anchor.`);
+    return null;
+  }
+  if (existing) {
+    // The body travels with the anchor so finalizeSummary can preserve anything
+    // that must survive the rewrite (the checkpoint marker) without a re-read.
+    return { id: existing.id, url: existing.html_url, body: existing.body || "" };
+  }
+  const { data: created } = await github.rest.issues.createComment({
+    owner,
+    repo,
+    issue_number: prNumber,
+    body,
+  });
+  return { id: created.id, url: created.html_url, body };
+}
+
+// Phase 2 (after review): write the final summary body. When the anchor's id is
+// known, update it directly (no extra read). Otherwise upsert: find then update
+// or create. Returns { id, url }, or null when the read API is unavailable and
+// the summary cannot be safely written without risking a duplicate.
+async function finalizeSummary({ github, owner, repo, prNumber, anchor, body, sticky, tag, preserveMarker = false, log }) {
+  const keep = (newBody, oldBody) => (preserveMarker ? preserveCheckpointMarker(newBody, oldBody) : newBody);
+  if (anchor && anchor.id != null) {
+    const { data: updated } = await github.rest.issues.updateComment({
+      owner,
+      repo,
+      comment_id: anchor.id,
+      body: keep(body, anchor.body),
+    });
+    return { id: updated.id, url: updated.html_url };
+  }
+  let existing = null;
+  try {
+    existing = await findSummaryIssueComment({ github, owner, repo, prNumber, sticky, tag, log });
+  } catch (e) {
+    log(`[summary] cannot check for existing summary at finalize (${e.message}); skipping to avoid duplicate.`);
+    return null;
+  }
+  if (existing) {
+    const { data: updated } = await github.rest.issues.updateComment({
+      owner,
+      repo,
+      comment_id: existing.id,
+      body: keep(body, existing.body),
+    });
+    return { id: updated.id, url: updated.html_url };
+  }
+  const { data: created } = await github.rest.issues.createComment({
+    owner,
+    repo,
+    issue_number: prNumber,
+    body,
+  });
+  return { id: created.id, url: created.html_url };
+}
+
+// ---- Incremental helpers ----
+
+async function getAuthenticatedLogin(github, log) {
+  try {
+    const { data: user } = await github.rest.users.getAuthenticated();
+    return user && user.login ? user.login : null;
+  } catch (e) {
+    log(`[auth] could not resolve authenticated user: ${e.message}`);
+    return null;
+  }
+}
+
+async function listExistingReviewComments(github, owner, repo, prNumber, log) {
+  const all = [];
+  let page = 1;
+  // Cap pagination so a pathological PR cannot stall the job; 10 pages = 1000.
+  const MAX_PAGES = 10;
+  // Sort newest-first so the page cap keeps the most recent comments: the
+  // incremental dedup cares about the latest coverage state, and on truncation
+  // we'd rather drop ancient comments than the recent ones the bot just posted.
+  // GitHub's default is ascending (oldest-first), which would keep the oldest
+  // 1000 and silently drop the newest — the exact comments dedup needs most.
+  try {
+    while (page <= MAX_PAGES) {
+      const res = await github.rest.pulls.listReviewComments({
+        owner,
+        repo,
+        pull_number: prNumber,
+        sort: "created",
+        direction: "desc",
+        per_page: 100,
+        page,
+      });
+      const items = res.data || [];
+      all.push(...items);
+      if (items.length < 100) break;
+      page++;
+    }
+  } catch (e) {
+    log(`[incremental] listing review comments failed (${e.message}); degrading to no history.`);
+    return [];
+  }
+  if (page > MAX_PAGES) {
+    log(`[incremental] listing review comments reached max page limit (${MAX_PAGES}); results may be incomplete.`);
+  }
+  return all;
+}
+
+function isBotComment(comment, botLogin) {
+  if (!comment || !comment.user) return false;
+  if (botLogin && comment.user.login === botLogin) return true;
+  // GITHUB_TOKEN posts as "github-actions[bot]"; GitHub Apps post as the app.
+  const login = comment.user.login || "";
+  return /github-actions\[bot\]$/i.test(login) || (botLogin != null && login === botLogin);
+}
+
+// Incremental overlap test. The current comment is considered a duplicate of
+// an existing bot comment (and thus skipped) when they target the same path
+// and RIGHT side AND one of these holds:
+//   1. both are single-line comments on the same line;
+//   2. both are multi-line comments whose line-range IoU (intersection over
+//      union) exceeds `threshold`.
+// A single-line comment is NEVER considered the same as a multi-line one, so
+// revisiting a line with a finer-grained single-line note is not suppressed by
+// a prior multi-line block (and vice versa).
+function overlapsComments(reviewComment, comments, threshold = DEFAULT_OVERLAP_THRESHOLD) {
+  const t = resolveThreshold(threshold);
+  const path = reviewComment.path;
+  const cur = lineSpan(reviewComment);
+  if (!cur) return false;
+  for (const comment of comments) {
+    if (comment.path !== path) continue;
+    if (comment.side && comment.side !== "RIGHT") continue;
+    const other = lineSpan(comment);
+    if (!other) continue;
+    if (sameCommentSpan(cur, other, t)) return true;
+  }
+  return false;
+}
+
+function overlapsHistory(reviewComment, history, threshold = DEFAULT_OVERLAP_THRESHOLD) {
+  return overlapsComments(reviewComment, history, threshold);
+}
+
+// Clamp/validate the caller-provided threshold to a sane (0, 1] number,
+// falling back to the default when it is missing, NaN, or out of range. This
+// keeps the public overlapsHistory API robust even when the value arrives from
+// an env var / action input as a malformed string.
+function resolveThreshold(threshold) {
+  const n = Number(threshold);
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : DEFAULT_OVERLAP_THRESHOLD;
+}
+
+// Resolve a comment into a line span tagged as single- or multi-line.
+// Returns { start, end, multiline } or null when no line can be resolved.
+// Handles both our own reviewComment shape ({start_line, line}) and GitHub's
+// historical comment shape ({start_line, line}; start_line null for
+// single-line). A comment is multi-line only when start_line and line are both
+// present and differ; start_line === line (or a missing start_line) is treated
+// as a single-line comment on that line.
+function lineSpan(c) {
+  const start = num(c.start_line);
+  const end = num(c.line != null ? c.line : c.end_line);
+  if (start == null && end == null) return null;
+  if (start != null && end != null && start !== end) {
+    return { start: Math.min(start, end), end: Math.max(start, end), multiline: true };
+  }
+  const single = end != null ? end : start;
+  return { start: single, end: single, multiline: false };
+}
+
+// Same-comment predicate implementing the incremental rules. The IoU
+// comparison is strict (>), so a span that exactly meets the threshold is NOT
+// treated as a duplicate.
+function sameCommentSpan(cur, other, threshold) {
+  if (cur.multiline !== other.multiline) return false;
+  if (!cur.multiline) return cur.start === other.start;
+  const overlap = Math.min(cur.end, other.end) - Math.max(cur.start, other.start) + 1;
+  if (overlap <= 0) return false;
+  const union = cur.end - cur.start + 1 + (other.end - other.start + 1) - overlap;
+  if (union <= 0) return false;
+  return overlap / union > threshold;
+}
+
+function num(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 1 ? n : null;
+}
+
+// The one description of OCR's inline-comment marker. Two call sites depend on
+// it — the retry idempotency check (getPostedCommentIds) and the resolve
+// ownership check (threadIsOurs) — and a drift between them would be silent in
+// both directions, so they are built from this single source. Anchored to the
+// HTML comment wrapper so user content or a quoted suggestion cannot forge it.
+const OCR_COMMENT_ID_SOURCE = String.raw`<!--\s*(ocr-\d+-\d+-[a-f0-9]+)\s*-->`;
+
+// Shared, non-global instance for the presence check. No /g means no lastIndex,
+// so .test() carries no state between the threads it is called on.
+// getPostedCommentIds builds its own /g copy instead, for exactly the reason
+// this one can be shared.
+const OCR_COMMENT_ID_RE = new RegExp(OCR_COMMENT_ID_SOURCE);
+
+// ---- Outdated thread resolution (#567) ----
+//
+// Deterministic, zero-LLM cleanup of the bot's OWN stale inline threads. The
+// "is this finding still relevant?" judgement is never ours: GitHub computes
+// `isOutdated` server-side (the thread's original lines no longer exist in the
+// current diff) and we only ever act on threads it has already marked that way.
+// Everything else in the predicate is a veto — a human reply, an already
+// resolved thread, or a finding from THIS run still sitting on the same lines
+// all keep the thread open.
+
+const REVIEW_THREADS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          path
+          isOutdated
+          isResolved
+          originalLine
+          originalStartLine
+          comments(first: 100) { totalCount nodes { author { login __typename } } }
+          # Aliased second selection so only the ROOT comment's body crosses the
+          # wire: ownership is proved by the marker OCR stamps on the comment it
+          # created, and replies cannot carry that proof. Fetching every body
+          # would multiply the payload for a field only nodes[0] is read from.
+          # Its author rides along so the proof of ownership and the identity
+          # derived from it are read off ONE node (see rootComment below).
+          root: comments(first: 1) { nodes { body author { login __typename } } }
+        }
+      }
+    }
+  }
+}`;
+
+// resolveReviewThread requires `contents: write`. That is counter-intuitive:
+// a review thread is pull-request conversation state, so `pull-requests: write`
+// looks like the scope that should cover it, and it does not. GitHub gates the
+// mutation on repository WRITE ACCESS ("you can resolve a conversation if you
+// opened the pull request or have write access to the repository"), and for an
+// installation token that access is granted by Contents, not Pull requests.
+//
+// Measured on three jobs differing only in their permissions block, each
+// resolving its own thread on a scratch PR, with no try/catch to hide a failure:
+//   contents: read  + pull-requests: write  -> FORBIDDEN
+//   contents: write + pull-requests: read   -> resolved
+//   contents: write + pull-requests: write  -> resolved
+// https://github.com/chethanuk/open-code-review/actions/runs/35202780271
+//
+// Workflows elsewhere that appear to call this under `pull-requests: write`
+// wrap the mutation in try/catch and log a warning when it fails.
+const RESOLVE_THREAD_MUTATION = `
+mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
+}`;
+
+// Hard cap on resolve mutations per run. Resolution is cleanup, not the job:
+// a PR that somehow accumulated hundreds of outdated bot threads should trickle
+// down over several runs rather than burn a run's whole GraphQL budget (and
+// trip secondary rate limits) in one burst.
+const MAX_RESOLVE_PER_RUN = 50;
+
+// List every review thread on the PR, paginated. Read-only and fail-open:
+// any GraphQL error degrades to "no threads", which makes the whole feature a
+// no-op rather than failing the run over a cleanup step.
+async function listBotReviewThreads({ github, owner, repo, prNumber, log, warn }) {
+  const all = [];
+  let cursor = null;
+  const MAX_PAGES = 10; // 1000 threads; far past any realistic PR.
+  let truncated = false;
+  try {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const res = await github.graphql(REVIEW_THREADS_QUERY, {
+        owner,
+        repo,
+        number: prNumber,
+        cursor,
+      });
+      const threads =
+        res && res.repository && res.repository.pullRequest
+          ? res.repository.pullRequest.reviewThreads
+          : null;
+      if (!threads) break;
+      for (const node of threads.nodes || []) {
+        if (node) all.push(node);
+      }
+      if (!threads.pageInfo || !threads.pageInfo.hasNextPage) break;
+      cursor = threads.pageInfo.endCursor;
+      // Last iteration and GitHub still has more: the walk stops short. Say so
+      // — a silent cap reads as "there were no other threads", and the reason
+      // counts printed later would be a partial census presented as a full one.
+      if (page === MAX_PAGES - 1) truncated = true;
+    }
+  } catch (e) {
+    const msg = `[resolve-outdated] listing review threads failed (${e.message}); resolving nothing.`;
+    if (warn) warn(msg);
+    else log(msg);
+    return [];
+  }
+  if (truncated) {
+    log(
+      `[resolve-outdated] listing review threads reached the max page limit (${MAX_PAGES}); results may be incomplete.`
+    );
+  }
+  return all;
+}
+
+// Does this thread's ROOT comment carry a marker OCR wrote? Only the root is
+// consulted: OCR creates a thread and never replies into one, so a marker
+// appearing deeper would mean someone quoted our comment back at us, which is
+// evidence of a human conversation rather than of ownership. A thread whose
+// root body did not come back (older data, a truncated response) is not
+// demonstrably ours and returns false — the fail-closed direction, since the
+// cost is a stale thread left open rather than someone else's thread resolved.
+function rootComment(thread) {
+  return (thread && thread.root && thread.root.nodes && thread.root.nodes[0]) || null;
+}
+
+function threadIsOurs(thread) {
+  const root = rootComment(thread);
+  return OCR_COMMENT_ID_RE.test((root && root.body) || "");
+}
+
+// GraphQL's reviewThreads returns a bot's SLUG ("github-actions") where REST —
+// and therefore getAuthenticatedLogin() and isBotComment() — uses the suffixed
+// form ("github-actions[bot]"). Measured on a live PR: the same comment reads
+// `github-actions` with __typename "Bot" through GraphQL and
+// `github-actions[bot]` through REST. Comparing the raw GraphQL login against a
+// REST-shaped botLogin would make every one of our own threads look like a
+// human reply, so the feature would resolve nothing and look merely inert.
+// Normalizing here keeps isBotComment's REST contract untouched for incremental
+// mode, which is its other caller.
+function graphqlAuthorLogin(author) {
+  if (!author || !author.login) return "";
+  const login = String(author.login);
+  return author.__typename === "Bot" && !/\[bot\]$/i.test(login) ? `${login}[bot]` : login;
+}
+
+// Pure predicate: may this thread be resolved, and if not, why not?
+// Returns "resolve" | "not_outdated" | "already_resolved" |
+// "unverified_partial_view" | "unverified_no_line" | "unlocatable_path" |
+// "not_ours" | "human_reply" | "overlap".
+//
+// Deliberately does NOT consult `viewerCanResolve`: it reports false for tokens
+// that can in fact resolve the thread, so gating on it would silently disable
+// the feature. The mutation is attempted and its failure is caught instead.
+function shouldResolveThread(
+  thread,
+  { botLogin, currentSpans = [], unlocatablePaths = new Set() } = {}
+) {
+  if (!thread || thread.isOutdated !== true) return "not_outdated";
+  if (thread.isResolved === true) return "already_resolved";
+  // Any participant we cannot positively identify as the bot counts as a human
+  // (an unknown/ghost author is treated as human on purpose — the failure mode
+  // of leaving a thread open is strictly cheaper than closing someone's reply).
+  const nodes = (thread.comments && thread.comments.nodes) || [];
+  // "No comment is a human's" is only evidence when we can see every comment.
+  // A thread with nothing visible is not demonstrably ours, and one with more
+  // comments than the query returned could carry a human reply we never saw —
+  // both stay open rather than being resolved on a partial view.
+  const total = thread.comments && thread.comments.totalCount;
+  if (nodes.length === 0 || (typeof total === "number" && total > nodes.length)) {
+    return "unverified_partial_view";
+  }
+  // Authorship alone cannot establish that WE created this thread. Every
+  // workflow in a repo that uses the default GITHUB_TOKEN posts as the same
+  // identity, so a sibling workflow's outdated review threads are
+  // indistinguishable from ours by author; and under a GitHub App token the
+  // `github-actions[bot]` fallback in isBotComment would accept those threads
+  // outright. The marker OCR stamps into every inline comment it creates
+  // (newCommentId, via formatComment) is the actual proof of authorship, so it
+  // is what the destructive path gates on. Checked before the human-reply loop
+  // because "not ours" is the more fundamental answer: a thread we did not
+  // create is not ours to classify, let alone resolve.
+  if (!threadIsOurs(thread)) return "not_ours";
+  // Identity comes from the ROOT comment's author, not from
+  // getAuthenticatedLogin(): that call is a user-token endpoint, so under the
+  // Actions token (and under a GitHub App installation token) it 403s and
+  // botLogin is null on every real run. isBotComment()'s only remaining rule is
+  // then the `github-actions[bot]` regex, which classifies OCR's OWN root
+  // comment as a human reply whenever the workflow runs under an App token —
+  // the feature looks inert instead of broken. The marker check above already
+  // proved the root comment is ours, so the root author IS the identity OCR
+  // posts under; every other comment must match it.
+  // Read off the SAME node the marker proved ours: the root alias. Taking the
+  // author from comments.nodes[0] instead would be correct only while GraphQL
+  // returns a thread's comments oldest-first, and a destructive gate should not
+  // rest on an ordering guarantee. `|| nodes[0]` covers a response that omitted
+  // the author field; when both are present and disagree, the loop below still
+  // rejects the thread, because nodes[0] must also match the root login.
+  const root = rootComment(thread);
+  const rootAuthor = (root && root.author) || (nodes[0] && nodes[0].author);
+  const rootLogin = graphqlAuthorLogin(rootAuthor);
+  // Fail closed on an unreadable root author, and on a human-typed root author
+  // that is not the login we authenticated as: a User carrying our marker is a
+  // quote of our comment, not our comment. A bot-typed (or `[bot]`-suffixed)
+  // root author is trusted because only an app can post as one.
+  const rootIsBot =
+    (rootAuthor && rootAuthor.__typename === "Bot") || /\[bot\]$/i.test(rootLogin);
+  if (!rootLogin) return "human_reply";
+  if (!rootIsBot && rootLogin !== botLogin) return "human_reply";
+  for (const c of nodes) {
+    if (graphqlAuthorLogin(c && c.author) !== rootLogin) return "human_reply";
+  }
+  // This run reported a finding ON THIS PATH that it could not place on a line,
+  // so that finding is invisible to the veto below: spansIntersect can only ever
+  // answer "no overlap" for it, which is indistinguishable from "that finding is
+  // gone". Unlike a path-less finding (handled run-wide by the caller), the
+  // blind spot here is bounded by the path the finding names, so it costs this
+  // path's threads and nothing else.
+  if (unlocatablePaths && unlocatablePaths.has(normalizeComparePath(thread.path))) {
+    return "unlocatable_path";
+  }
+  // A thread whose ORIGINAL lines are still covered by a finding from this run
+  // is the rebase case: GitHub calls it outdated because the diff moved, but the
+  // model just re-reported the same problem. Leave it open.
+  const span = { path: thread.path, start_line: thread.originalStartLine, line: thread.originalLine };
+  // No usable original line means the veto below can only ever answer "no
+  // overlap", so it is unreachable for this thread — and that veto is the whole
+  // mitigation for GitHub reporting a still-live finding's thread as outdated
+  // after a force-push. Resolving on a check that cannot fail is worse than
+  // leaving the thread open, so treat it exactly like a partial comment view.
+  if (!lineSpan(span)) return "unverified_no_line";
+  if (spansIntersect(span, currentSpans)) return "overlap";
+  return "resolve";
+}
+
+// Resolve-veto overlap: ANY shared line between a thread's original span and a
+// finding from this run keeps the thread open.
+//
+// Deliberately NOT overlapsHistory/sameCommentSpan. Those implement incremental
+// dedupe, where a false negative merely re-posts a comment, so they answer a
+// narrower question: a single-line span is never "the same comment" as a
+// multi-line one, and two multi-line spans must clear an IoU threshold. Both
+// rules make real overlaps invisible here — a thread on line 10 against a fresh
+// 8-12 finding, or a 10-20 thread against a 19-40 finding, would score "not the
+// same comment" and the thread would be resolved on top of a live finding. This
+// gate cannot afford that, so it uses plain intersection with no threshold.
+function spansIntersect(span, currentSpans) {
+  const cur = lineSpan(span);
+  if (!cur) return false;
+  const path = normalizeComparePath(span.path);
+  for (const s of currentSpans || []) {
+    if (!s || normalizeComparePath(s.path) !== path) continue;
+    const other = lineSpan(s);
+    if (!other) continue;
+    if (cur.start <= other.end && other.start <= cur.end) return true;
+  }
+  return false;
+}
+
+// Fold the spelling drift that actually occurs between the two sources the
+// resolve gate compares: `thread.path` comes from GitHub's GraphQL (always
+// repo-relative, forward slashes), while a finding's path comes straight out of
+// the model's JSON with no normalization, so `./src/a.js`, `/src/a.js` and
+// `src\a.js` all turn up. Without this the veto compares them as raw strings
+// and answers "no overlap", which resolves a thread sitting on a live finding.
+//
+// No case folding on purpose: paths are case-sensitive on the platforms that
+// matter, and folding would report overlaps that do not exist. For this gate a
+// false overlap is the safe direction, but a false MATCH between two genuinely
+// different files would silently veto real cleanup, so we do not invent one.
+//
+// Deliberately NOT wired into overlapsHistory/sameCommentSpan. They have the
+// same gap, but a miss there costs one duplicate comment rather than a wrongly
+// resolved thread, and changing them would move incremental-mode behavior in a
+// change that is not about incremental mode.
+function normalizeComparePath(p) {
+  if (typeof p !== "string") return "";
+  return p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+}
+
+// Classify a resolve-mutation failure. Both "forbidden" and "throttled" mean
+// "stop trying for this run" — the first because every later mutation will fail
+// identically, the second because hammering a throttled endpoint deepens the
+// incident. Throttling is checked first: GitHub reports secondary rate limits
+// as 403, which would otherwise read as a permission problem.
+function classifyResolveError(e) {
+  if (!e) return "other";
+  const types = [];
+  const msgs = [e.message];
+  if (e.type) types.push(String(e.type));
+  // Octokit surfaces GraphQL errors either directly on the error (`.errors`) or
+  // under the parsed response (`.response.errors`); check both shapes.
+  for (const list of [e.errors, e.response && e.response.errors]) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (item && item.type) types.push(String(item.type));
+      if (item && item.message) msgs.push(String(item.message));
+    }
+  }
+  const text = msgs.filter(Boolean).join(" ");
+  if (/rate limit|abuse|secondary/i.test(text) || e.status === 429) return "throttled";
+  if (
+    types.some((t) => /^(FORBIDDEN|UNAUTHORIZED|INSUFFICIENT_SCOPES)$/i.test(t)) ||
+    /not accessible by integration|resource not accessible|forbidden|permission/i.test(text) ||
+    e.status === 403
+  ) {
+    return "forbidden";
+  }
+  return "other";
+}
+
+// Resolve this run's stale threads, sequentially and capped. Never throws:
+// every failure path degrades to "resolved fewer threads than we could have".
+// Returns { candidates, attempted, resolved, failed, reasons }.
+async function resolveOutdatedThreads({
+  github,
+  owner,
+  repo,
+  prNumber,
+  core,
+  log,
+  botLogin,
+  currentSpans = [],
+  dryRun = false,
+}) {
+  const warn = (msg) => {
+    if (core && typeof core.warning === "function") core.warning(msg);
+    else log(msg);
+  };
+  // Fail closed on a finding this run produced but could not place in the tree:
+  // no usable start/end line, or no path. `result.comments` comes straight from
+  // the model's JSON with no normalization, so both are reachable. Either way
+  // the finding is live but invisible to the veto — spansIntersect compares
+  // `path` first, and a path-less span matches nothing — and "vetoes nothing" is
+  // indistinguishable from "the finding is gone", which is exactly the state
+  // that resolves a thread on top of a real problem. What differs is how far the
+  // blind spot reaches, and the two cases are NOT the same size:
+  //   - No path at all: the finding could belong to any path, so it cannot veto
+  //     anything specific. Resolution is disabled for the whole run, and we do
+  //     not even spend the listing query.
+  //   - Path but no line: bounded by the path the finding names, so it vetoes
+  //     that path only. This is the shape that already goes to the summary via
+  //     commentsWithoutLine on ordinary runs — routine output, not an anomaly.
+  //     Letting one of them disable the run would quietly no-op the feature on a
+  //     good share of real PRs.
+  const pathless = currentSpans.filter((s) => !s || !s.path).length;
+  const unlocatablePaths = new Set(
+    currentSpans.filter((s) => s && s.path && !lineSpan(s)).map((s) => normalizeComparePath(s.path))
+  );
+  const reasons = {};
+  if (pathless > 0) reasons.pathless_finding = pathless;
+  // `unlocatable_path` is deliberately NOT pre-seeded from the set's size: the
+  // thread loop below already counts it, and `reasons` reports threads skipped,
+  // not findings seen. Seeding it would add the two together and report a
+  // skipped= count no thread corresponds to.
+  const threads =
+    pathless > 0 ? [] : await listBotReviewThreads({ github, owner, repo, prNumber, log, warn });
+
+  const candidates = [];
+  const previewLines = [];
+  for (const thread of threads) {
+    const reason = shouldResolveThread(thread, { botLogin, currentSpans, unlocatablePaths });
+    reasons[reason] = (reasons[reason] || 0) + 1;
+    if (reason === "resolve") candidates.push(thread);
+    if (dryRun) {
+      const at = thread.originalStartLine ? `${thread.originalStartLine}-${thread.originalLine}` : thread.originalLine;
+      previewLines.push(`[resolve-outdated] ${thread.path}:${at} -> ${reason}`);
+    }
+  }
+  const attempted = candidates.slice(0, MAX_RESOLVE_PER_RUN);
+
+  let resolved = 0;
+  let failed = 0;
+  if (!dryRun) {
+    // Sequential on purpose: a burst of parallel mutations is exactly what
+    // trips GitHub's secondary rate limiter on a write endpoint.
+    // Reuses the documented posting knob rather than a private, undocumented
+    // one: a second pacing dial nobody can find is a dial nobody can turn.
+    const delay = parseNonNegInt(process.env.OCR_SUCCESS_DELAY, 2000);
+    for (let i = 0; i < attempted.length; i++) {
+      try {
+        await github.graphql(RESOLVE_THREAD_MUTATION, { threadId: attempted[i].id });
+        resolved++;
+      } catch (e) {
+        const kind = classifyResolveError(e);
+        if (kind === "forbidden") {
+          warn(
+            `[resolve-outdated] cannot resolve review threads with this token (${e.message}). ` +
+              `resolve_outdated: 'true' needs the calling workflow to grant \`contents: write\` in its permissions block. ` +
+              `Resolved ${resolved} of ${attempted.length} thread(s); skipping the rest.`
+          );
+          break;
+        }
+        if (kind === "throttled") {
+          warn(
+            `[resolve-outdated] rate limited while resolving threads (${e.message}); ` +
+              `resolved ${resolved} of ${attempted.length} thread(s); skipping the rest this run.`
+          );
+          break;
+        }
+        failed++;
+        warn(`[resolve-outdated] failed to resolve thread ${attempted[i].id}: ${e.message}`);
+      }
+      if (delay > 0 && i < attempted.length - 1) await sleep(delay);
+    }
+  }
+
+  const skipped =
+    Object.keys(reasons)
+      .filter((k) => k !== "resolve")
+      .sort()
+      .map((k) => `${k}:${reasons[k]}`)
+      .join(",") || "none";
+  log(
+    `[resolve-outdated] mode=${dryRun ? "report" : "resolve"} threads=${threads.length} ` +
+      `candidates=${candidates.length} attempted=${attempted.length} resolved=${resolved} ` +
+      `failed=${failed} skipped=${skipped}`
+  );
+  // Report mode's whole job is to be readable before anyone flips this to
+  // 'true', and the aggregate counts above do not say WHICH thread. Emitted
+  // after the summary (so the summary stays the first line) and through log,
+  // never core.warning: 50 threads would blow past GitHub's 10-annotation
+  // display cap and bury the aggregate.
+  for (const line of previewLines) log(line);
+
+  return { candidates: candidates.length, attempted: attempted.length, resolved, failed, reasons };
+}
+
+// ---- Rate-limit / retry helpers (ported verbatim) ----
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Parse a non-negative integer env value, falling back to defaultVal when the
+// value is missing, NaN, or negative. Unlike `parseInt(...) || default`, this
+// guards against negative numbers: a negative parseInt result is truthy, so
+// `parseInt || default` would let a nonsensical negative value bypass the
+// fallback.
+function parseNonNegInt(val, defaultVal) {
+  const n = parseInt(val, 10);
+  return Number.isFinite(n) && n >= 0 ? n : defaultVal;
+}
+
+// Case-insensitive header lookup. Octokit normalizes response headers to
+// lowercase, but this defensive check also handles original casing so that
+// quota logging and retry delay computation never silently miss a header.
+function getHeader(headers, name) {
+  const v = headers[name] != null ? headers[name] : headers[name.toLowerCase()];
+  return v != null ? String(v).trim() : undefined;
+}
+
+// Decide whether an error is worth retrying and, if so, how long to wait.
+// Implements GitHub's documented rate-limit retry strategy using the
+// response headers (retry-after, x-ratelimit-remaining, x-ratelimit-reset).
+// Returns { delayMs, source, detail } when retryable, or null otherwise.
+// See: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+function computeRetryDelayMs(error, attempt) {
+  if (!error) return null;
+  const status = error.status;
+  const message = String(error.message || "");
+  const isRateLimit = status === 429 || (status === 403 && /rate limit|abuse|secondary/i.test(message));
+  const isTransient = (status >= 500 && status < 600) || status === 408;
+  if (!isRateLimit && !isTransient) return null;
+
+  const headers = ((error.response || {}).headers) || {};
+  const header = (name) => getHeader(headers, name);
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  const cap = parseNonNegInt(process.env.OCR_RETRY_MAX_DELAY, 300000);
+  const base = parseNonNegInt(process.env.OCR_RETRY_BASE_DELAY, 60000);
+
+  let info = null;
+
+  if (isRateLimit) {
+    // (1) Honor "retry-after" when present (seconds, or an HTTP-date).
+    const retryAfter = header("retry-after");
+    if (retryAfter) {
+      const secs = Number(retryAfter);
+      if (!isNaN(secs) && secs >= 0) {
+        info = { rawMs: secs * 1000, source: "retry-after", detail: `${secs}s (from header)` };
+      } else {
+        const dateMs = Date.parse(retryAfter);
+        if (!isNaN(dateMs)) {
+          info = { rawMs: Math.max(0, dateMs - Date.now()), source: "retry-after (HTTP-date)", detail: retryAfter };
+        }
+      }
+    }
+
+    // (2) Primary limit exhausted (x-ratelimit-remaining=0): wait until reset.
+    if (!info) {
+      const remaining = header("x-ratelimit-remaining");
+      const reset = header("x-ratelimit-reset");
+      if (reset != null && Number(remaining) === 0) {
+        const rawMs = Math.max(0, Number(reset) - nowSec) * 1000;
+        info = { rawMs, source: "x-ratelimit-reset", detail: `remaining=0, reset epoch=${reset} (in ${Math.ceil(rawMs / 1000)}s)` };
+      }
+    }
+
+    // (3) Secondary limit with no retry hint: docs say wait at least one
+    //     minute, then increase exponentially between retries.
+    if (!info) {
+      const backoff = Math.min(base * Math.pow(2, attempt), cap);
+      const jitter = Math.floor(Math.random() * 1000);
+      info = { rawMs: backoff + jitter, source: "exponential-backoff", detail: `base=${base}ms*2^${attempt} (cap ${cap}ms) +${jitter}ms jitter` };
+    }
+  } else {
+    // Transient server error (5xx / 408): back off without the 60s floor.
+    const transientBase = 2000;
+    const backoff = Math.min(transientBase * Math.pow(2, attempt), cap);
+    const jitter = Math.floor(Math.random() * 1000);
+    info = { rawMs: backoff + jitter, source: "transient-backoff", detail: `base=${transientBase}ms*2^${attempt} (cap ${cap}ms) +${jitter}ms jitter (HTTP ${status})` };
+  }
+
+  const delayMs = Math.min(info.rawMs, cap);
+  if (delayMs < info.rawMs) {
+    info.detail += ` [CAPPED to ${cap}ms; GitHub recommended ${Math.ceil(info.rawMs / 1000)}s]`;
+  }
+  return { delayMs, source: info.source, detail: info.detail };
+}
+
+// Best-effort logging of remaining rate-limit quota from a successful response.
+// Returns the parsed x-ratelimit-remaining value (or null) for proactive throttling.
+function logRateLimitQuota(response, tag, log) {
+  try {
+    const h = (response && response.headers) || {};
+    const header = (name) => getHeader(h, name);
+    const remaining = header("x-ratelimit-remaining");
+    const limit = header("x-ratelimit-limit");
+    const reset = header("x-ratelimit-reset");
+    if (remaining != null) {
+      log(
+        `[rate-limit] ${tag}: remaining=${remaining}/${limit != null ? limit : "?"}` +
+          (reset != null ? `, reset epoch=${reset}` : "")
+      );
+    }
+    return remaining != null ? Number(remaining) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// ---- Read API + idempotency helpers ----
+//
+// The helpers below back the "prevent duplicate review posts on retry"
+// strategy: when a batch createReview fails with a 5xx, the request may still
+// have landed on the server. Before retrying, we query existing reviews and
+// review comments (each tagged with a per-run HTML comment) and only retry the
+// comments that are actually missing. Read calls are paced (shorter delays
+// than writes) and degrade to "unknown" (null) when the read API itself fails,
+// so the caller skips retrying rather than risking a duplicate.
+
+// Retry wrapper shared by write and read API calls. Reuses computeRetryDelayMs
+// so rate-limit headers (retry-after / x-ratelimit-*) are honored uniformly.
+// Throws on final failure so the caller can decide how to degrade.
+async function withRetry(tag, fn, log) {
+  const MAX_RETRIES = parseNonNegInt(process.env.OCR_MAX_RETRIES, 3);
+  let lastErr;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const retryInfo = computeRetryDelayMs(e, attempt);
+      const willRetry = retryInfo != null && attempt < MAX_RETRIES;
+      if (willRetry) {
+        const secs = (retryInfo.delayMs / 1000).toFixed(1);
+        log(
+          `[${tag}] transient/rate-limited (HTTP ${e.status}, attempt ${attempt + 1}/${MAX_RETRIES}). ` +
+            `Waiting ${secs}s via '${retryInfo.source}' (${retryInfo.detail}). ${e.message}`
+        );
+        await sleep(retryInfo.delayMs);
+      } else {
+        log(`[${tag}] failed after ${attempt + 1} attempts: ${e.message}`);
+        throw e;
+      }
+    }
+  }
+  throw lastErr != null
+    ? lastErr
+    : new Error(`withRetry(${tag}): exhausted retries with no error captured`);
+}
+
+// Read API wrapper with retry + proactive pacing. Read requests are cheaper
+// than writes but still consume the primary rate limit and can trigger the
+// secondary limit when issued in a tight loop. Use shorter delays than writes
+// (READ_SUCCESS_DELAY / READ_LOW_REMAINING_SPACING).
+async function readWithPacing(tag, fn, log) {
+  const res = await withRetry(tag, fn, log);
+  const remaining = logRateLimitQuota(res, tag, log);
+  const LOW_REMAINING_THRESHOLD = parseNonNegInt(process.env.OCR_LOW_REMAINING_THRESHOLD, 3);
+  const lowQuota = remaining != null && remaining <= LOW_REMAINING_THRESHOLD;
+  if (lowQuota) {
+    const READ_LOW_REMAINING_SPACING = parseNonNegInt(process.env.OCR_READ_LOW_REMAINING_SPACING, 5000);
+    log(`[rate-limit] quota low after read (${remaining} <= ${LOW_REMAINING_THRESHOLD}); spacing ${READ_LOW_REMAINING_SPACING}ms.`);
+    await sleep(READ_LOW_REMAINING_SPACING);
+  } else {
+    const READ_SUCCESS_DELAY = parseNonNegInt(process.env.OCR_READ_SUCCESS_DELAY, 500);
+    await sleep(READ_SUCCESS_DELAY);
+  }
+  return res;
+}
+
+// Paginated helper that walks all pages of a list endpoint with retry and
+// pacing. Returns the concatenated array of items.
+async function readAllPages(tag, pageFn, log, maxPages = 50) {
+  if (!Number.isFinite(maxPages) || maxPages < 1) {
+    throw new Error(`readAllPages: maxPages must be a positive integer, got ${maxPages}`);
+  }
+  const all = [];
+  let page = 1;
+  const PER_PAGE = 100;
+  while (page <= maxPages) {
+    const res = await readWithPacing(`${tag} (page ${page})`, () => pageFn(page, PER_PAGE), log);
+    const items = res.data || [];
+    all.push(...items);
+    if (items.length < PER_PAGE) break;
+    page++;
+  }
+  // NOTE: Truncation here is intentional and acts as a safety valve against
+  // unbounded loops (e.g. a bug or malicious activity), not as a normal
+  // operating mode. A PR accumulating >5000 review comments is far outside
+  // expected usage; in that rare case we log a warning and proceed with
+  // partial data rather than failing the whole review.
+  //
+  // Caveat: this is NOT the same as a read failure. When the read API throws
+  // (rate limit, 5xx), isCommentAlreadyPosted catches it and returns null
+  // (unknown), so the caller skips retrying and creates no duplicate. A
+  // truncated walk does not throw; it returns a partial set silently, so
+  // isCommentAlreadyPosted returns false (definitively "not posted") for any
+  // comment beyond the cap, and the retry loop will repost it, producing a
+  // duplicate. This tradeoff is accepted because the trigger is far outside
+  // expected usage; if that ceiling ever needs to rise, make maxPages
+  // configurable.
+  if (page > maxPages) {
+    log(`[${tag}] reached max page limit (${maxPages}); results may be incomplete.`);
+  }
+  return all;
+}
+
+// Idempotency check: find whether a batch review with this run tag already
+// exists on the PR. Returns { found, review } or throws on final failure
+// (caller degrades to the original fallback).
+async function findExistingBatchReview({ github, owner, repo, prNumber, tag, log }) {
+  const reviews = await readAllPages("listReviews", (page, per_page) =>
+    github.rest.pulls.listReviews({ owner, repo, pull_number: prNumber, per_page, page }), log
+  );
+  for (const r of reviews) {
+    if ((r.body || "").includes(tag)) {
+      return { found: true, review: r };
+    }
+  }
+  return { found: false };
+}
+
+// Collect the set of comment-level IDs already posted on the PR (across all
+// reviews). Uses listReviewComments (PR-level, cross-review) so a single
+// paginated walk covers everything, avoiding the O(missing) amplification of
+// per-comment lookups.
+async function getPostedCommentIds({ github, owner, repo, prNumber, log }) {
+  const comments = await readAllPages("listReviewComments", (page, per_page) =>
+    github.rest.pulls.listReviewComments({ owner, repo, pull_number: prNumber, per_page, page }), log
+  );
+  const ids = new Set();
+  // The ID format is `ocr-<RUN_TAG>-<random>` where RUN_TAG is
+  // `<runId>-<runAttempt>` and <random> is a per-comment random hex token.
+  // Capture group 1 holds the bare ID, so we can add it directly without
+  // stripping comment markers. Built with /g (own instance — /g carries
+  // lastIndex, so it must never be shared) to walk every ID in one body.
+  const ID_RE = new RegExp(OCR_COMMENT_ID_SOURCE, "g");
+  for (const c of comments) {
+    const body = c.body || "";
+    let m;
+    while ((m = ID_RE.exec(body)) !== null) {
+      ids.add(m[1]);
+    }
+  }
+  return ids;
+}
+
+// Check whether a specific comment-level ID has already landed on the server.
+// Used by the per-comment retry loop: when a createReview call fails with a
+// transient 5xx/408, the request may have reached GitHub and succeeded even
+// though the response was lost. Querying before retrying prevents posting a
+// duplicate inline comment.
+// Returns true/false when the check succeeds, or null when the read API is
+// unavailable (rate limit, 5xx, etc.). Returning null (rather than defaulting
+// to false) prevents the caller from assuming the comment was not posted and
+// risking a duplicate on retry.
+//
+// Each call walks listReviewComments fresh — no cached snapshot. A snapshot
+// reused across retries would go stale as comments land during the loop, and a
+// stale miss for a 5xx-landed comment would trigger a retry that posts a
+// duplicate. Read calls are paced via readAllPages/readWithPacing and degrade
+// to null (skip retry) if the read API itself fails, so the extra walks cannot
+// produce duplicates.
+async function isCommentAlreadyPosted({ github, owner, repo, prNumber, id, log }) {
+  try {
+    const posted = await getPostedCommentIds({ github, owner, repo, prNumber, log });
+    return posted.has(id);
+  } catch (e) {
+    log(`[isCommentAlreadyPosted] check failed for ${id} (${e.message}); treating as unknown to avoid duplicates.`);
+    return null;
+  }
+}
+
+// Random per-comment ID, assigned once when the inline-comment item is built
+// and carried on the item struct. Random (rather than content-derived) so two
+// distinct comments that share the same path/line/content still get different
+// IDs and the idempotency check never mistakes one for the other (which would
+// silently drop the second). Embedded in the comment body as an HTML comment
+// so getPostedCommentIds can match it back on retry.
+function newCommentId(runTag) {
+  return `ocr-${runTag}-${crypto.randomBytes(8).toString("hex")}`;
+}
+
+// ---- Badge + publication policy helpers (#478) ----
+//
+// These are pure functions (no I/O, no side effects) so they can be unit-tested
+// directly. buildBadge byte-matches the CLI's cmd/opencodereview/output.go
+// buildBadge degeneration so review output is consistent across surfaces (I6).
+// buildPolicy/routeComment implement fail-open finding-publication routing
+// (I1, I4): a finding never matches the policy on unknown/malformed metadata,
+// and routing is a placement decision (findings route OUT of the inline write
+// path), so a routed finding can never be double-posted on retry.
+
+// Strip C0/C1 control characters from a metadata value. The CLI's
+// sanitizeTerminal (cmd/opencodereview/output.go:197-206) strips control chars
+// but PRESERVES \t and \n (harmless in a terminal). This Action sanitizer is
+// intentionally STRICTER: it strips ALL control chars including \t and \n,
+// because a newline/tab in a category or severity would break the comment
+// body's layout (the badge renders in Markdown in a browser). This is a
+// deliberate, documented divergence from strict OC1 byte-parity: clean enum
+// values (the overwhelmingly common case) render identically across surfaces,
+// and the divergence only manifests for malformed model output, in a SAFER
+// direction (the Action cannot have its layout broken by a control char).
+function sanitizeMetadata(value) {
+  return String(value == null ? "" : value).replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+}
+
+// Build the category/severity badge for a comment, byte-matching the CLI's
+// buildBadge degeneration (cmd/opencodereview/output.go:98-114):
+//   both non-empty -> "[category · severity]" (with a middot, U+00B7)
+//   only category  -> "[category]"
+//   only severity  -> "[severity]"
+//   neither        -> "" (no badge line)
+// Returns the empty string (not a newline) when nothing renders, so callers
+// can prepend conditionally without leaving a blank line.
+function buildBadge(comment) {
+  const category = sanitizeMetadata(comment && comment.category);
+  const severity = sanitizeMetadata(comment && comment.severity);
+  if (category && severity) return `[${category} · ${severity}]`;
+  if (category) return `[${category}]`;
+  if (severity) return `[${severity}]`;
+  return "";
+}
+
+// Shields.io color per severity, following the reviewer-suggested scale in
+// #882 (low -> green, medium -> orange, high -> red). "critical" is not in
+// that three-level scale; it extends it one step hotter (darkred, a standard
+// CSS color name shields.io accepts). Keys match SEVERITIES.
+const SEVERITY_BADGE_COLOR = Object.freeze({
+  critical: "darkred",
+  high: "red",
+  medium: "orange",
+  low: "green",
+});
+// Fallback color when severity is missing or not a known enum member. The
+// reviewer's guidance was to render these rather than fall back to plain text,
+// with any color acceptable; blue reads as informational.
+const CATEGORY_BADGE_COLOR = "blue";
+
+// Escape a value for a shields.io static-badge path segment ("-" separates
+// segments, "_" renders as a space). Our enum values contain neither, but the
+// escape keeps the helper correct if the enums ever grow such a value.
+function shieldsEscape(value) {
+  return encodeURIComponent(value.replace(/-/g, "--").replace(/_/g, "__"));
+}
+
+// Escape Markdown image alt text. The alt is derived from the plain-text badge
+// whose metadata has had control chars stripped but may still carry
+// Markdown-special characters (e.g. a stray "]" from high-temperature model
+// output), which would prematurely close the image's [...] alt span. Escaping
+// "\", "[", and "]" keeps the image intact and the alt rendering to the literal
+// text. "[" is escaped defensively; "]" and "\" are the structural ones.
+function escapeMarkdownAlt(value) {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
+}
+
+// Build the category/severity badge as a single shields.io static badge
+// (#882) for surfaces that render Markdown (GitHub review/summary comments),
+// in the format img.shields.io/badge/<label>-<color>. flat is shields.io's
+// default style, so the URL carries no style parameter. The image's alt text
+// is the plain-text badge content from buildBadge (with Markdown-special
+// characters escaped), so screen readers and image-load failures degrade to
+// the previous text form.
+//
+//   both fields -> ![category · severity](…/badge/category-severity-<color>)
+//   one field   -> ![field](…/badge/field-<color>)
+//   neither     -> "" (no badge line)
+//
+// The color comes from the severity when known, otherwise the fixed category
+// color — no lookup can ever yield "undefined". Values are sanitized (control
+// chars stripped) and URL-escaped before interpolation, so rendering an
+// unrecognized value is safe: it is only ever the same text already shown in
+// the plain-text badge. This is a deliberate divergence from strict CLI
+// byte-parity (I6): the CLI keeps the plain-text badge (a terminal cannot
+// render images); the alt text preserves the shared form across surfaces.
+function buildBadgeImage(comment) {
+  const text = buildBadge(comment);
+  if (text === "") return "";
+  const category = sanitizeMetadata(comment && comment.category).trim().toLowerCase();
+  const severity = sanitizeMetadata(comment && comment.severity).trim().toLowerCase();
+  const color = SEVERITY_BADGE_COLOR[severity] || CATEGORY_BADGE_COLOR;
+  const alt = escapeMarkdownAlt(text.slice(1, -1)); // "[bug · high]" -> "bug · high"
+  const label = category && severity
+    ? `${shieldsEscape(category)}-${shieldsEscape(severity)}`
+    : shieldsEscape(category || severity);
+  return `![${alt}](https://img.shields.io/badge/${label}-${color})`;
+}
+
+// Parse the publication policy from the raw opt-in inputs. Returns a normalized
+// policy object, or the NO_ROUTING sentinel when no routing is requested or any
+// value is malformed (fail-open for the policy itself, upholding I1).
+//
+//   severityThreshold: a severity name (case-insensitive) at-or-below which
+//     findings route. An unknown/empty value disables severity routing.
+//   categories: a comma-separated category list (case-insensitive). Unknown
+//     category tokens are dropped; an empty list (or all-unknown) disables
+//     category routing.
+//
+// The returned object has two booleans so routeComment can short-circuit
+// without re-parsing, plus the normalized values it needs to decide:
+//   {
+//     routeBySeverity: bool,
+//     severityRank: number,           // rank of the threshold; -1 when disabled
+//     routeByCategory: bool,
+//     categories: Set<string>,        // lowercase enum members; empty when disabled
+//   }
+function buildPolicy({ severityThreshold, categories } = {}) {
+  let routeBySeverity = false;
+  let severityRank = -1;
+  if (severityThreshold != null) {
+    const norm = String(severityThreshold).trim().toLowerCase();
+    if (SEVERITY_RANK.has(norm)) {
+      routeBySeverity = true;
+      severityRank = SEVERITY_RANK.get(norm);
+    }
+    // Any other value (empty, unknown, garbage) leaves routeBySeverity=false
+    // (fail-open for the policy: unknown threshold -> no routing).
+  }
+
+  let routeByCategory = false;
+  const categorySet = new Set();
+  if (categories != null) {
+    const tokens = String(categories)
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.length > 0);
+    for (const t of tokens) {
+      if (CATEGORIES.includes(t)) categorySet.add(t);
+      // Unknown category tokens are silently dropped (fail-open: an unknown
+      // category in the policy never matches a finding's category, so including
+      // it would be a no-op anyway; dropping keeps the set clean).
+    }
+    if (categorySet.size > 0) routeByCategory = true;
+  }
+
+  if (!routeBySeverity && !routeByCategory) return NO_ROUTING;
+  return { routeBySeverity, severityRank, routeByCategory, categories: categorySet };
+}
+
+// Decide whether a comment routes to the summary per the policy. Returns
+// { routed: true, reason } or { routed: false }. A finding matches when its
+// severity is at-or-below the threshold (when severity routing is on) OR its
+// category is in the category list (when category routing is on). Unknown or
+// malformed metadata on the finding NEVER matches (I1): an empty/unknown
+// category or severity has no rank and no enum membership, so it falls through
+// to the normal inline path (visible), never dropped.
+function routeComment(comment, policy) {
+  if (!policy || (!policy.routeBySeverity && !policy.routeByCategory)) {
+    return { routed: false };
+  }
+  const catRaw = comment && comment.category != null ? String(comment.category).trim().toLowerCase() : "";
+  const sevRaw = comment && comment.severity != null ? String(comment.severity).trim().toLowerCase() : "";
+  const catKnown = catRaw !== "" && CATEGORIES.includes(catRaw);
+  const sevKnown = sevRaw !== "" && SEVERITY_RANK.has(sevRaw);
+
+  if (policy.routeBySeverity && sevKnown && SEVERITY_RANK.get(sevRaw) <= policy.severityRank) {
+    return { routed: true, reason: `Routed to summary (severity ${sevRaw}${catKnown ? ` · category ${catRaw}` : ""})` };
+  }
+  if (policy.routeByCategory && catKnown && policy.categories.has(catRaw)) {
+    return { routed: true, reason: `Routed to summary (category ${catRaw}${sevKnown ? ` · severity ${sevRaw}` : ""})` };
+  }
+  return { routed: false };
+}
+
+// ---- Formatting helpers (ported verbatim) ----
+
+// Assemble the visible comment body. When `id` is provided (inline comments),
+// the per-comment ID tag is prepended as an HTML comment (invisible when
+// rendered) so getPostedCommentIds can match it back on retry for the
+// idempotency check. The category/severity badge is then prepended (when
+// present) on its own leading line AFTER the id comment, so the idempotency
+// regex (unanchored, scans the whole body) still matches and the badge renders
+// as the first visible line. The code suggestion block is appended if present.
+function formatComment(comment, id) {
+  let body = id ? `<!-- ${id} -->\n` : "";
+  const badge = buildBadgeImage(comment);
+  if (badge) body += `${badge}\n`;
+  body += comment.content || "";
+  if (comment.suggestion_code && comment.existing_code) {
+    body += "\n\n**Suggestion:**\n";
+    body += fencedBlock(comment.suggestion_code, "suggestion");
+  }
+  return body;
+}
+
+function formatCommentMarkdown(comment, error) {
+  let md = "";
+  // The badge renders as a leading line before the path heading (consistent
+  // with formatComment), so the heading/reason lines still anchor the comment
+  // and existing substring assertions on them are unaffected. The badge is ""
+  // for any finding without category/severity metadata.
+  const badge = buildBadgeImage(comment);
+  if (badge) md += `${badge}\n`;
+  md += `### 📄 \`${comment.path}\``;
+  if (comment.start_line && comment.end_line) {
+    md += ` (L${comment.start_line}-L${comment.end_line})`;
+  }
+  md += "\n\n";
+  if (error) {
+    md += `⚠️ GitHub could not post this as an inline comment: ${error}\n\n`;
+  }
+  md += comment.content || "";
+
+  if (comment.suggestion_code && comment.existing_code) {
+    md += "\n\n<details><summary>💡 Suggested Change</summary>\n\n";
+    md += "**Before:**\n" + fencedBlock(comment.existing_code) + "\n\n";
+    md += "**After:**\n" + fencedBlock(comment.suggestion_code) + "\n\n";
+    md += "</details>";
+  }
+  return md;
+}
+
+// Merged summary header. All posting-outcome counts are surfaced here (and
+// ONLY here) so the numbers add up to the total and the reader no longer has
+// to reconcile two separately presented breakdowns (the old "posted as
+// inline / posted as summary" header vs. the trailing "Posting Statistics"
+// block, whose overlapping definitions made the summary hard to interpret).
+//
+// The five counts are mutually exclusive and, together with `inline`, sum to
+// `total`:
+//   inline  — comments that landed as review inline comments
+//   summary — comments without line info, rendered in the summary body below
+//   routed  — comments the publication policy moved from inline to summary
+//             (also rendered in the body below, each tagged with its reason)
+//   skipped — comments suppressed by incremental overlap filtering
+//   failed  — comments that had line info but could not be posted (also
+//             rendered in the body below, each tagged with its failure reason)
+function buildSummaryBody({ total, inline, summary, skipped, routed = 0, failed, warnings }) {
+  let body = `🔍 **OpenCodeReview** found **${total}** issue(s) in this PR.`;
+  if (total > 0) {
+    body += `\n- ✅ Successfully posted inline: ${inline} comment(s)`;
+    if (summary > 0) {
+      body += `\n- 📝 In summary (no line info): ${summary} comment(s)`;
+    }
+    if (routed > 0) {
+      body += `\n- 📋 Routed to summary by policy: ${routed} comment(s)`;
+    }
+    if (skipped > 0) {
+      body += `\n- ⏭️ Skipped (overlap with history): ${skipped} comment(s)`;
+    }
+    if (failed > 0) {
+      body += `\n- ❌ Failed to post inline: ${failed} comment(s)`;
+    }
+  }
+  if (warnings && warnings.length > 0) {
+    body += `\n\n⚠️ ${warnings.length} warning(s) occurred during review.`;
+  }
+  return body;
+}
+
+// Pre-review summary body: shown in the anchor comment while inline comments
+// are being posted. Includes only what is known before the review lands (issue
+// count, warnings, comments without line info, routed comments) — final posting
+// statistics are added by the finalize phase. Kept informative (not an empty
+// placeholder) so the summary is useful even if the run is interrupted before
+// finalize. Routed findings are known before the review (the policy decision is
+// made in the partition loop) so they are rendered here too, keeping the
+// pre-review anchor accurate.
+function buildPreReviewSummaryBody(totalCount, summaryComments, routedComments, warnings) {
+  let body = `🔍 **OpenCodeReview** found **${totalCount}** issue(s) in this PR.`;
+  if (totalCount > 0) {
+    body += `\n- ⏳ _Posting review comments…_`;
+    if (routedComments && routedComments.length > 0) {
+      body += `\n- 📋 Routed to summary by policy: ${routedComments.length} comment(s)`;
+    }
+  }
+  if (warnings.length > 0) {
+    body += `\n\n⚠️ ${warnings.length} warning(s) occurred during review.`;
+  }
+  body += formatSummaryComments(summaryComments);
+  body += formatSummaryComments(routedComments);
+  body += formatWarnings(warnings);
+  return body;
+}
+
+function formatSummaryComments(summaryComments) {
+  let body = "";
+  for (const { comment, reason } of summaryComments) {
+    body += "\n\n---\n\n";
+    body += formatCommentMarkdown(comment, reason);
+  }
+  return body;
+}
+
+// Render the warning contents as a bulleted list under a "⚠️ Warnings" heading.
+// Returns "" when there are no warnings, so callers can append unconditionally.
+// OCR warning objects carry `file`, `message`, and `type`; each present field is
+// surfaced so the summary shows where/why the warning happened. Plain-string
+// warnings (and any unknown shape) degrade gracefully to their textual form.
+function formatWarnings(warnings) {
+  if (!warnings || warnings.length === 0) return "";
+  let body = "\n\n---\n\n⚠️ **Warnings:**";
+  for (const w of warnings) {
+    body += `\n- ${formatWarningEntry(w)}`;
+  }
+  return body;
+}
+
+// Format a single warning as a compact bullet. Builds a `file (type): message`
+// prefix from whichever of file/type are present, then appends the message.
+// Missing fields are skipped so a partial warning still reads naturally.
+function formatWarningEntry(w) {
+  if (w == null) return "";
+  if (typeof w === "string") return w;
+  if (typeof w === "object") {
+    const prefixParts = [];
+    if (w.file != null && String(w.file) !== "") prefixParts.push(`\`${w.file}\``);
+    if (w.type != null && String(w.type) !== "") prefixParts.push(`(\`${w.type}\`)`);
+    const prefix = prefixParts.join(" ");
+    const msg = w.message != null ? String(w.message) : "";
+    if (prefix && msg) return `${prefix}: ${msg}`;
+    if (msg) return msg;
+    if (prefix) return prefix;
+    try {
+      return JSON.stringify(w);
+    } catch (_) {
+      return String(w);
+    }
+  }
+  return String(w);
+}
+
+function fencedBlock(content, language = "") {
+  const text = String(content || "");
+  const fence = safeFence(text);
+  let block = fence + language + "\n" + text;
+  if (!text.endsWith("\n")) block += "\n";
+  return block + fence;
+}
+
+const MAX_COMMENT_STDERR_CHARS = 20000;
+
+function tailForComment(text, limit = MAX_COMMENT_STDERR_CHARS) {
+  const s = String(text || "");
+  if (s.length <= limit) return s;
+  return `[... ${s.length - limit} earlier characters truncated; see the ocr-stderr.log artifact ...]\n${s.slice(-limit)}`;
+}
+
+function safeFence(content) {
+  const matches = String(content || "").match(/`+/g) || [];
+  const maxTicks = matches.reduce((max, ticks) => Math.max(max, ticks.length), 0);
+  return "`".repeat(Math.max(3, maxTicks + 1));
+}
+
+function safeRead(fs, p) {
+  try {
+    return fs.readFileSync(p, "utf8");
+  } catch (_) {
+    return "";
+  }
+}
+
+// Rate-limit cooldown + idempotency reconciliation for a FAILED batch
+// createReview. Shared by the primary batch and the 422 secondary filtered
+// batch so the two can never drift apart.
+//
+// Order matters: cool down FIRST (honoring the error's retry/rate-limit
+// headers) before any further API call, including the idempotency reads.
+// Firing reads immediately after a rate-limit/5xx would further pressure an
+// already-struggling API; this is the same cool-down-before-read discipline
+// the per-comment loop applies before isCommentAlreadyPosted.
+//
+// The idempotency read ("did the review land?") is only meaningful when the
+// request MAY have reached the server: 5xx, 408 timeout, or a network error
+// with no status. For a pure rate-limit (429 / 403 abuse) or a validation
+// error (422), the request was rejected before the review was created, so it
+// definitely did not land — querying would be both pointless AND an extra read
+// fired during a rate-limit episode. This mirrors the per-comment
+// maybeReachedServer predicate so all layers stay consistent.
+//
+// Returns { toRetry, alreadyPosted, reconciled, status, maybeReachedServer,
+//           unverified }.
+async function cooldownAndReconcile({ github, owner, repo, prNumber, log, error, items, tag, label, labelLower }) {
+  const retry = computeRetryDelayMs(error, 0);
+  if (retry != null) {
+    const secs = (retry.delayMs / 1000).toFixed(1);
+    log(
+      `${label} createReview failed (HTTP ${error.status}). ` +
+        `Cooling down ${secs}s via '${retry.source}' (${retry.detail}) before any retry or read.`
+    );
+    await sleep(retry.delayMs);
+  }
+
+  const status = error.status;
+  const maybeReachedServer =
+    (typeof status === "number" && (status >= 500 || status === 408)) ||
+    status == null; // network errors (ECONNRESET, ETIMEDOUT, ...)
+
+  let existingReview = null;
+  if (maybeReachedServer) {
+    log(`Checking whether the ${labelLower} review actually landed on the server before retrying...`);
+    try {
+      existingReview = await findExistingBatchReview({ github, owner, repo, prNumber, tag, log });
+    } catch (checkErr) {
+      const reason =
+        `Could not verify whether the failed ${labelLower} review posted this comment ` +
+        `(review lookup failed: ${checkErr.message})`;
+      log(
+        `Idempotency check failed (${checkErr.message}). The write may have landed, so ` +
+          `retrying could duplicate comments; leaving ${items.length} comment(s) unverified ` +
+          `and continuing to the final summary.`
+      );
+      return {
+        toRetry: [],
+        alreadyPosted: 0,
+        reconciled: false,
+        status,
+        maybeReachedServer,
+        unverified: items.map((item) => ({ item, error: reason })),
+      };
+    }
+  } else {
+    log(`${label} did not reach the server (HTTP ${status || "n/a"}); skipping idempotency check and retrying all comments.`);
+  }
+
+  // If the review landed, only retry the missing comments; otherwise retry all
+  // of them. NOTE: the run tag is shared across all batches, so
+  // findExistingBatchReview may match an EARLIER batch's review — harmless for
+  // correctness because getPostedCommentIds returns a server-global set of
+  // every fence ID across ALL reviews, and we filter these items against that
+  // global set (never the set against the items). The counts below therefore
+  // reflect only the items passed in.
+  if (existingReview && existingReview.found) {
+    // This walk goes through readAllPages -> readWithPacing -> withRetry and
+    // THROWS on final failure. Letting it escape would unwind the entire run
+    // and leave the summary on its pre-review body. Retrying writes is also
+    // unsafe once a tagged review is known to exist: without the posted IDs we
+    // cannot distinguish landed comments from missing ones. Preserve that
+    // uncertainty as summary failures instead—visible, final, and duplicate-free.
+    let postedIds;
+    try {
+      postedIds = await getPostedCommentIds({ github, owner, repo, prNumber, log });
+    } catch (readErr) {
+      const reason =
+        `Could not verify whether the failed ${labelLower} review posted this comment ` +
+        `(posted-comment read failed: ${readErr.message})`;
+      log(
+        `Posted-comment read failed (${readErr.message}). The tagged review exists, so ` +
+          `retrying could duplicate comments; leaving ${items.length} comment(s) unverified ` +
+          `and continuing to the final summary.`
+      );
+      return {
+        toRetry: [],
+        alreadyPosted: 0,
+        reconciled: false,
+        status,
+        maybeReachedServer,
+        unverified: items.map((item) => ({ item, error: reason })),
+      };
+    }
+    if (postedIds) {
+      const toRetry = items.filter((item) => !postedIds.has(item.id));
+      const alreadyPosted = items.length - toRetry.length;
+      log(
+        `A ${labelLower} review with this run's tag exists on the server ` +
+          `(review_id=${existingReview.review.id}, may belong to an earlier batch). ` +
+          `${alreadyPosted}/${items.length} of this batch's inline comments already posted. ` +
+          `${toRetry.length} missing, will retry only those.`
+      );
+      return {
+        toRetry,
+        alreadyPosted,
+        reconciled: alreadyPosted > 0,
+        status,
+        maybeReachedServer,
+        unverified: [],
+      };
+    }
+  }
+
+  log(`${label} review not found on server. Falling back to per-comment posting...`);
+  return {
+    toRetry: items,
+    alreadyPosted: 0,
+    reconciled: false,
+    status,
+    maybeReachedServer,
+    unverified: [],
+  };
+}
+
+// GitHub documents 422 on this endpoint as "Validation failed, OR the endpoint
+// has been spammed" — so a bare status code is NOT evidence that a comment
+// pointed at a line outside the diff. Only re-send a filtered batch when the
+// error body actually names a line/diff validation problem; anything else
+// (spam/abuse detection, an unrelated validation failure) falls through to the
+// per-comment loop, which paces and retries on its own.
+//
+// OBSERVED against live GitHub (POST /repos/{o}/{r}/pulls/{n}/reviews). The
+// response body is:
+//
+//   { "message": "Unprocessable Entity",
+//     "errors": ["Line could not be resolved and Line could not be resolved"],
+//     "documentation_url": "...", "status": "422" }
+//
+// Real `errors[]` strings seen, all of which must keep matching:
+//   "Line could not be resolved"            line outside any hunk, past EOF,
+//                                           negative, LEFT side on an added-only
+//                                           line, or a span straddling two hunks
+//   "Start position could not be resolved"  start_line > line (inverted span)
+//   "Path could not be resolved"            path not in the PR at all
+//
+// So /could not be resolved/i is the pattern actually carrying this feature;
+// the other four are defensive. Do not "simplify" them away without re-probing
+// live GitHub — a wording change that matches nothing disables the grouping
+// silently, and every unit test would still pass.
+//
+// Note also that GitHub does NOT attribute the failure to individual comments:
+// two bad comments produced ONE string joined with the English word " and ".
+// That is why this file filters locally against listFiles hunks instead of
+// trying to parse which comment GitHub rejected.
+const LINE_RESOLUTION_PATTERNS = [
+  /must be part of the diff/i,
+  /not part of the diff/i,
+  /could not be resolved/i,
+  /outside the diff/i,
+  /diff hunk/i,
+];
+// Defensive only: this endpoint returns `errors` as an array of plain STRINGS,
+// so the entry.field branch below is unreachable for createReview. Kept because
+// other REST endpoints do return structured {resource, field, code} entries.
+const LINE_RESOLUTION_FIELDS = new Set(["line", "start_line", "position", "original_line", "original_start_line"]);
+
+function isLineResolutionFailure(error) {
+  if (!error) return false;
+  const texts = [];
+  // CAREFUL: `error.response.data.message` on its own is just "Unprocessable
+  // Entity" and matches no pattern below, so narrowing this function to that
+  // field alone would disable the fallback entirely. Verified against live
+  // GitHub.
+  //
+  // On the live payload TWO independent sources carry the decisive wording:
+  // Octokit's composed `error.message` ("<data.message>: <errors[] entries>")
+  // and the raw `errors[]` strings collected just below. Either one alone still
+  // activates the gate, so neither is individually load-bearing *for that
+  // shape* — but keep both: `errors[]` is absent whenever a caller re-wraps the
+  // error, and `error.message` is the only source for the bare-{message} shapes
+  // this endpoint produces for some validation failures.
+  if (error.message) texts.push(String(error.message));
+
+  const errors =
+    (error.response && error.response.data && error.response.data.errors) ||
+    (error.data && error.data.errors) ||
+    error.errors;
+  if (Array.isArray(errors)) {
+    for (const entry of errors) {
+      if (!entry) continue;
+      if (typeof entry === "string") {
+        texts.push(entry);
+        continue;
+      }
+      // A structured validation error naming a line field is conclusive on its
+      // own, regardless of how the message happens to be worded.
+      if (entry.field && LINE_RESOLUTION_FIELDS.has(String(entry.field))) return true;
+      if (entry.message) texts.push(String(entry.message));
+    }
+  }
+
+  const text = texts.join(" | ");
+  if (!text) return false;
+  return LINE_RESOLUTION_PATTERNS.some((re) => re.test(text));
+}
+
+// Parse a unified-diff patch into the RIGHT-side (new file) line ranges it
+// covers, ONE RANGE PER HUNK. Ranges — not a flat set of line numbers — because
+// GitHub requires a multi-line comment's start_line and line to sit inside the
+// SAME hunk; a flat set cannot tell a legal span from one that straddles two
+// hunks, and the straddling span would 422 all over again.
+//
+// Within a hunk the new-file line numbers are contiguous from the hunk header's
+// start: additions and context lines advance the counter, deletions do not (they
+// exist only in the old file). So each hunk collapses to {start, end}.
+function parseDiffHunkInventory(patch) {
+  if (!patch) return { ranges: [], complete: false };
+  const ranges = [];
+  // Capture the new-file START and declared line count. A missing count means
+  // one line per unified-diff syntax. The count is needed to detect a clipped
+  // `patch`: treating an observed prefix as the full hunk would falsely prove
+  // later lines invalid and silently route postable findings to the summary.
+  const hunkHeaderRegex = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
+  const lines = String(patch).split("\n");
+  let current = null;
+  let sawHunk = false;
+  let complete = true;
+
+  const flush = () => {
+    if (!current) return;
+    if (current.observed !== current.expected) complete = false;
+    // A hunk with no RIGHT-side lines at all (a pure deletion, "+N,0") never
+    // advanced the counter, so end < start and there is nothing to comment on.
+    if (current.end >= current.start) ranges.push({ start: current.start, end: current.end });
+  };
+
+  for (const line of lines) {
+    const match = hunkHeaderRegex.exec(line);
+    if (match) {
+      flush();
+      const start = parseInt(match[1], 10);
+      const expected = match[2] == null ? 1 : parseInt(match[2], 10);
+      current = { start, end: start - 1, next: start, expected, observed: 0 };
+      sawHunk = true;
+      continue;
+    }
+    if (!current) continue;
+
+    if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (line.startsWith("-")) continue; // deletion: old file only, does not advance
+    if (line.startsWith("+") || line.startsWith(" ")) {
+      current.end = current.next;
+      current.next++;
+      current.observed++;
+    }
+    // Anything else (notably a bare "" produced by a trailing newline in the
+    // patch string) is not a diff body line and must not advance the counter.
+  }
+  flush();
+  return { ranges, complete: sawHunk && complete };
+}
+
+function parseDiffHunkRanges(patch) {
+  return parseDiffHunkInventory(patch).ranges;
+}
+
+// Classification: "valid" | "outside_diff" | "malformed" | "unknown".
+//
+// "outside_diff" requires valid location metadata and proof from the diff;
+// it routes the finding to the summary without blocking checkpoint advancement.
+// "malformed" also routes to the summary but remains a blocking failure.
+// Missing or partial diff metadata is "unknown": keep the per-comment behavior.
+function classifyCommentAgainstDiff(item, diff) {
+  // No inventory at all, or one we know is truncated: we cannot prove anything.
+  if (!diff || !diff.complete) return "unknown";
+
+  const { reviewComment } = item;
+  const path = reviewComment.path;
+
+  // We only model RIGHT-side (new file) lines. The producer builds RIGHT-side
+  // comments today; if that ever changes, decline to judge rather than drop.
+  if (reviewComment.side && reviewComment.side !== "RIGHT") return "unknown";
+
+  const endLine = reviewComment.line;
+  if (endLine == null) return "unknown";
+  const startLine = reviewComment.start_line != null ? reviewComment.start_line : endLine;
+
+  // Malformed metadata is not proof of an out-of-diff location, even if the
+  // path is absent or its patch is unavailable. Check it before those cases.
+  if (
+    typeof path !== "string" || path.length === 0 ||
+    !Number.isInteger(startLine) || !Number.isInteger(endLine) ||
+    startLine < 1 || endLine < 1 || startLine > endLine
+  ) return "malformed";
+
+  // File is not among the PR's changed files at all — provably outside the diff.
+  if (!diff.known.has(path)) return "outside_diff";
+
+  // File IS in the PR but GitHub omitted its `patch` (binary, or a diff over
+  // the size limit). We know nothing about its lines.
+  const ranges = diff.files.get(path);
+  if (!ranges) return "unknown";
+
+  // Both endpoints must fall inside ONE hunk.
+  const withinOneHunk = ranges.some((r) => startLine >= r.start && endLine <= r.end);
+  return withinOneHunk ? "valid" : "outside_diff";
+}
+
+// Human-readable location for the failure summary. A multi-line comment reports
+// its full span, so a range that failed on start_line is not described by the
+// (perfectly valid) end line alone.
+function describeCommentLocation(reviewComment) {
+  const endLine = reviewComment.line;
+  const startLine = reviewComment.start_line;
+  if (endLine == null && startLine == null) return "Line n/a";
+  if (startLine != null && endLine != null && startLine !== endLine) {
+    return `Lines ${startLine}-${endLine}`;
+  }
+  return `Line ${endLine != null ? endLine : startLine}`;
+}
+
+// Build the PR's RIGHT-side diff inventory.
+//
+// Returns { files, known, complete }:
+//   files    Map<path, Array<{start,end}>> — paths whose patch we could parse
+//   known    Set<path>                     — every path in the PR's file list
+//   complete boolean                       — the file list was fully enumerated
+//
+// `complete` makes "outside_diff" provable: with a truncated walk, an absent
+// path proves nothing. Pagination goes through readWithPacing so this
+// read honors the same retry/pacing/quota discipline as every other read in
+// this file. GitHub caps listFiles at 3000 files, hence MAX_PAGES = 30.
+//
+// `cache` (optional) memoizes the result for the run: with several batches each
+// failing 422, the inventory would otherwise be refetched per batch.
+async function getPrDiffHunks({ github, owner, repo, prNumber, commitSha, log, cache }) {
+  const logFn = typeof log === "function" ? log : () => {};
+  if (cache && cache.diff !== undefined) return cache.diff;
+
+  const files = new Map();
+  const known = new Set();
+  let complete = true;
+
+  const PER_PAGE = 100;
+  const MAX_PAGES = 30;
+  let page = 1;
+  while (page <= MAX_PAGES) {
+    const res = await readWithPacing(
+      `listFiles (page ${page})`,
+      () => github.rest.pulls.listFiles({ owner, repo, pull_number: prNumber, per_page: PER_PAGE, page }),
+      logFn
+    );
+    const batch = (res && res.data) || [];
+    for (const file of batch) {
+      if (!file || !file.filename) continue;
+      known.add(file.filename);
+      if (file.patch) {
+        const parsed = parseDiffHunkInventory(file.patch);
+        if (parsed.complete) {
+          files.set(file.filename, parsed.ranges);
+        } else {
+          logFn(
+            `[422-fallback] Patch data for ${file.filename} is incomplete or malformed; ` +
+              `comments on that file will be treated as unknown rather than out-of-diff.`
+          );
+        }
+      }
+    }
+    if (batch.length < PER_PAGE) break;
+    page++;
+  }
+  if (page > MAX_PAGES) {
+    complete = false;
+    logFn(
+      `[422-fallback] PR changed-file list exceeded ${MAX_PAGES * PER_PAGE} files; ` +
+        `diff inventory is incomplete, so no comment will be discarded as out-of-diff.`
+    );
+  }
+
+  // An empty inventory proves nothing. A PR that produced review comments
+  // necessarily has changed files, so an empty listFiles response is an anomaly
+  // (diff not yet materialized server-side, or a malformed/empty response body)
+  // rather than evidence that every commented path sits outside the diff.
+  // Trusting it would classify EVERY comment "outside_diff" and discard the
+  // batch without a single posting attempt — the exact outcome the "unknown"
+  // classification exists to prevent. Note this is the mirror of the truncation
+  // case above: too many files and zero files are both "cannot judge".
+  if (known.size === 0) {
+    complete = false;
+    logFn(
+      `[422-fallback] PR changed-file list came back empty, which cannot be right for a PR ` +
+        `under review; treating the diff inventory as incomplete, so no comment will be ` +
+        `discarded as out-of-diff.`
+    );
+  }
+
+  // listFiles describes the PR's current head, while createReview targets the
+  // event-time commitSha. A push between those reads can move or remove a hunk:
+  // the current inventory then cannot prove anything about the older commit.
+  // Check the head AFTER walking listFiles so a push during pagination is also
+  // detected. If it moved, make the whole inventory conservative (`unknown`).
+  if (complete && commitSha) {
+    const headRes = await readWithPacing(
+      "getPullRequestHead",
+      () => github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+      logFn
+    );
+    const inventoryHead = headRes && headRes.data && headRes.data.head && headRes.data.head.sha;
+    if (!inventoryHead || inventoryHead !== commitSha) {
+      complete = false;
+      logFn(
+        `[422-fallback] PR head changed while resolving diff hunks ` +
+          `(review commit=${commitSha}, current head=${inventoryHead || "unknown"}); ` +
+          `no comment will be discarded as out-of-diff.`
+      );
+    }
+  }
+
+  const diff = { files, known, complete };
+  if (cache) cache.diff = diff;
+  return diff;
+}
+
+// ---- Cross-push checkpoints (#476) ----
+//
+// Opt-in. A run that provably reviewed everything it selected records the head
+// it covered in a hidden marker inside its sticky summary comment; the next run
+// may then review only <checkpoint head>..<new head> instead of
+// <merge-base>..<new head>, so a 40-commit PR is not re-reviewed from scratch
+// on every push.
+//
+// The whole design is fail-closed: resolveCheckpointRange runs an ordered gate
+// and ANY doubt — feature off, summary missing, marker unreadable, base moved,
+// config changed, ancestry unprovable — returns mode "full", which reviews the
+// same range the action reviews today. The narrowed range is only ever taken
+// when every condition holds.
+//
+// TRUST BOUNDARY: the marker is read only from a comment authored by this run's
+// own authenticated identity. That proves who POSTED the comment, not that its
+// body is unmodified — anyone with write permission on the repository can edit
+// a bot comment. So the boundary this buys is "write-permission holders are
+// trusted"; a fork contributor (no write permission) cannot plant or alter a
+// marker, which is the case that matters for pull_request_target.
+
+const CHECKPOINT_VERSION = 1;
+// Marker shape: an HTML comment (invisible in the rendered summary) carrying a
+// base64 JSON payload, so payload text can contain "-->" or newlines without
+// breaking out of the comment.
+//
+// The pattern stays a source string because two of its uses need the `g` flag
+// and those two build their own RegExp every time, deliberately: a shared
+// global RegExp carries a mutable lastIndex between calls, which is an
+// intermittent bug waiting for the first `.exec` loop that returns early.
+// The flagless uses have no such state — `test` and `exec` on a RegExp without
+// `g` never touch lastIndex — so they share one instance.
+const CHECKPOINT_MARKER_PATTERN = "<!-- ocr-checkpoint:v1 ([A-Za-z0-9+/]+={0,2}) -->";
+const CHECKPOINT_MARKER_RE = new RegExp(CHECKPOINT_MARKER_PATTERN);
+const CHECKPOINT_SHA_RE = /^[0-9a-f]{40}$/;
+// Event actions that mean "look at this PR again from scratch": a reopen or a
+// draft going ready is a request for a fresh opinion on the whole diff, not for
+// the delta since the last push.
+const EVENT_FULL_SCOPE = new Set(["reopened", "ready_for_review"]);
+
+function buildCheckpointMarker(payload) {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+  return `<!-- ocr-checkpoint:v1 ${encoded} -->`;
+}
+
+// Never erase a checkpoint we cannot re-derive. The sticky summary is rewritten
+// wholesale on every run, and the marker to re-emit normally comes from the
+// resolve step's read (checkpointCarry). That read can come back empty for
+// reasons that say nothing about the marker's usefulness — the author check
+// could not be satisfied, listComments failed — and a run that then completes
+// without advancing would blank a checkpoint the next run might have used.
+// So: if the body about to be written carries no marker and the body being
+// replaced does, keep the old one verbatim. This grants no trust — the next
+// run re-runs the full read gate against whatever survives here.
+//
+// "Exactly one" is the same rule parseCheckpointMarker applies: a body with two
+// markers is ambiguous and is rejected there. Copying one of the two forward
+// would resolve that ambiguity by picking the first, and the next run would
+// then read a single well-formed marker and narrow to it. Rescuing nothing
+// leaves the ambiguity intact, which keeps failing closed.
+function preserveCheckpointMarker(newBody, oldBody) {
+  if (typeof oldBody !== "string" || oldBody === "") return newBody;
+  if (CHECKPOINT_MARKER_RE.test(newBody || "")) return newBody;
+  const found = oldBody.match(new RegExp(CHECKPOINT_MARKER_PATTERN, "g")) || [];
+  return found.length === 1 ? `${newBody}\n\n${found[0]}` : newBody;
+}
+
+// Extract the checkpoint payload from a comment body, or null when the body
+// carries no readable checkpoint. Null covers BOTH "no marker at all" (the
+// normal first run on a PR) and "marker present but unusable"; the caller maps
+// both to the same fail-closed reason because neither yields a usable range.
+// Two markers in one body are ambiguous and therefore also null.
+function parseCheckpointMarker(body) {
+  if (typeof body !== "string" || body === "") return null;
+  const re = new RegExp(CHECKPOINT_MARKER_PATTERN, "g");
+  const found = [];
+  let m;
+  while ((m = re.exec(body)) !== null) found.push(m[1]);
+  if (found.length !== 1) return null;
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(found[0], "base64").toString("utf8"));
+  } catch (e) {
+    return null;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  return payload;
+}
+
+// Structural validation of a parsed payload. Returns null when the payload is
+// usable, otherwise a short human-readable reason (logged, not branched on).
+//
+// terminal_state must be "complete". NOTE: per computeTerminal
+// (internal/session/manifest.go:941) "complete" means no item in the SELECTED
+// set failed — waived items and items excluded before selection are INSIDE
+// that guarantee, i.e. "complete" is completeness with respect to what the run
+// chose to review, not with respect to the whole diff. That is the strongest
+// signal the manifest offers, and it is why the range is only ever narrowed
+// past a run that reported it.
+function validateCheckpointPayload(payload, { prNumber } = {}) {
+  if (!payload) return "no payload";
+  if (payload.v !== CHECKPOINT_VERSION) return `unsupported version ${JSON.stringify(payload.v)}`;
+  if (prNumber != null && payload.pr !== prNumber) return `belongs to PR ${JSON.stringify(payload.pr)}`;
+  if (!CHECKPOINT_SHA_RE.test(payload.head)) return "head is not a 40-hex sha";
+  if (payload.terminal_state !== "complete") return `terminal_state ${JSON.stringify(payload.terminal_state)}`;
+  if (typeof payload.base_ref !== "string" || payload.base_ref === "") return "missing base_ref";
+  if (typeof payload.merge_base !== "string" || payload.merge_base === "") return "missing merge_base";
+  if (typeof payload.fingerprint !== "string" || payload.fingerprint === "") return "missing fingerprint";
+  return null;
+}
+
+// Who wrote a comment, as a GitHub App slug. `performed_via_github_app` is what
+// the API attaches to any comment written through an App token (the default
+// GITHUB_TOKEN is the "github-actions" app); the bot login is the fallback for
+// payloads that omit it. "" means "no bot wrote this".
+function checkpointAuthorSlug(comment) {
+  const app = comment && comment.performed_via_github_app;
+  if (app && typeof app.slug === "string" && app.slug !== "") return app.slug;
+  const login = (comment && comment.user && comment.user.login) || "";
+  const m = /^(.+)\[bot\]$/i.exec(login);
+  return m ? m[1] : "";
+}
+
+// Is this comment one of ours?
+//
+// NOT via GET /user: that endpoint is 403 ("Resource not accessible by
+// integration") for the default GITHUB_TOKEN *and* for a GitHub App
+// installation token, so gating on it made every real run fail closed and the
+// feature never narrowed anything. What GitHub does attest on the comment
+// itself is the writer: an App slug and/or a Bot-typed user, both derived from
+// the token that posted and neither settable by a commenter. A fork
+// contributor — the untrusted party under pull_request_target, and the only
+// one the trust boundary claims to exclude — posts as a User, so the plant
+// case is still rejected.
+//
+// appSlug tightens this to one specific app for callers that know which app
+// their token belongs to, which narrows the trust set from "any bot that can
+// post an issue comment carrying our marker" to one app. The action passes
+// "github-actions" whenever github_token is the default token, because that
+// token is always that app. It leaves appSlug empty for a caller-supplied
+// token: an installation token cannot ask GitHub which app it is (GET /app
+// needs a JWT), so there is no slug to pin.
+//
+// One consequence of pinning: a sticky summary keeps its ORIGINAL author, so a
+// repo that switches from a custom App to the default token keeps reading
+// author_unverified until that comment is deleted and reposted. That is
+// fail-closed — a wider review, never a wrong one — and the log line below
+// names the slug that was expected so it is diagnosable.
+function isCheckpointAuthorOurs(comment, appSlug = "") {
+  const user = (comment && comment.user) || null;
+  if (!user) return false;
+  // performed_via_github_app is set for a user-to-server token too, i.e. on a
+  // comment a HUMAN wrote through some App (a CLI, a browser integration). The
+  // App slug there attests the client, not the author, so a User-typed account
+  // is never ours no matter what app it posted through — otherwise a fork
+  // contributor could plant a marker just by commenting through any App.
+  if (user.type === "User") return false;
+  const slug = checkpointAuthorSlug(comment);
+  if (slug === "" && user.type !== "Bot") return false;
+  if (appSlug) return slug === appSlug;
+  return true;
+}
+
+// Read the checkpoint payload out of this PR's sticky summary comment, with the
+// author check applied. Returns { reason, payload, raw }:
+//   reason "ok"              -> payload is the marker's decoded payload and raw
+//                               is the marker string, byte for byte as read
+//   "no_summary_comment"     -> no sticky summary exists yet
+//   "author_unverified"      -> GitHub does not attribute the summary to a bot
+//                               writer (or not to `appSlug`, when one is given)
+//   "corrupt_checkpoint"     -> no readable marker in the body
+//   "resolver_error"         -> the comment could not be listed at all
+//
+// appSlug optionally tightens the author check to one specific app (see
+// isCheckpointAuthorOurs); empty means "any writer GitHub attributes to a bot".
+async function readCheckpointComment({ github, owner, repo, prNumber, appSlug = "", log }) {
+  let comment;
+  try {
+    comment = await findSummaryIssueComment({
+      github,
+      owner,
+      repo,
+      prNumber,
+      sticky: true,
+      tag: "",
+      log,
+    });
+  } catch (e) {
+    log(`[checkpoint] cannot list issue comments (${e.message}); reviewing the full range.`);
+    return { reason: "resolver_error", payload: null, raw: "" };
+  }
+  if (!comment) return { reason: "no_summary_comment", payload: null, raw: "" };
+
+  if (!isCheckpointAuthorOurs(comment, appSlug)) {
+    log(
+      appSlug
+        ? `[checkpoint] summary comment was not written by the "${appSlug}" app; reviewing the full range.`
+        : "[checkpoint] summary comment was not written by a verifiable bot identity; reviewing the full range."
+    );
+    return { reason: "author_unverified", payload: null, raw: "" };
+  }
+
+  const body = comment.body || "";
+  const payload = parseCheckpointMarker(body);
+  if (!payload) return { reason: "corrupt_checkpoint", payload: null, raw: "" };
+  // parseCheckpointMarker just proved the body holds exactly one marker, so the
+  // exec cannot miss and the fallback is unreachable today. It stays so that a
+  // future edit to that guard degrades into an empty carry — a wider next range
+  // — instead of a TypeError on a null match.
+  const raw = (CHECKPOINT_MARKER_RE.exec(body) || [""])[0];
+  return { reason: "ok", payload, raw };
+}
+
+// The ordered gate. Returns exactly eight keys:
+//   mode             "checkpoint" | "full"
+//   reason           "ok" | "same_head_noop" | one of the thirteen fail-closed
+//                    reasons (disabled, sticky_disabled, manual_full_review,
+//                    event_full_scope, no_summary_comment, author_unverified,
+//                    corrupt_checkpoint, schema_invalid, base_changed,
+//                    config_changed, not_ancestor, unknown_object,
+//                    resolver_error)
+//   from             the checkpoint head to review from ("" in full mode, so the
+//                    caller's ${RANGE_FROM:-$MERGE_BASE} keeps today's range)
+//   to               headSha
+//   checkpointBefore the head recorded by the marker that was read, if any
+//   ancestry         "" (not probed) | ancestor | not_ancestor | unknown_object | error
+//   sourceRun        the run id that wrote the marker, if any
+//   fingerprint      the config fingerprint the marker recorded, if any
+//
+// isAncestor(a, b) must resolve to git's `merge-base --is-ancestor` exit code:
+// 0 = a is an ancestor of b, 1 = it is not, 128 = the object is not in this
+// clone. 128 is deliberately NOT treated as "not an ancestor": it means we
+// could not check, and it is the state a shallow clone or a head_sha override
+// (no PR to fetch from) produces, so it gets its own reason to stay greppable.
+async function resolveCheckpointRange({
+  github,
+  owner,
+  repo,
+  prNumber,
+  enabled = false,
+  sticky = true,
+  fullReview = false,
+  // github.event.action. "reopened" and "ready_for_review" mean a human just
+  // asked for the PR to be looked at again, so they get the whole diff even
+  // when a valid checkpoint would narrow it.
+  eventAction = "",
+  appSlug = "",
+  headSha = "",
+  baseRef = "",
+  mergeBase = "",
+  fingerprint = "",
+  isAncestor,
+  // Optional pre-read from readCheckpointComment. The caller needs the raw
+  // marker string anyway (to carry it forward on a run that does not advance),
+  // and that read costs a full listComments pagination plus an identity lookup.
+  // Passing it in keeps the whole feature at one read per run and makes the
+  // range decision and the carried marker come from the same observation.
+  read = null,
+  log = () => {},
+}) {
+  const full = (reason, seen) =>
+    Object.assign(
+      {
+        mode: "full",
+        reason,
+        from: "",
+        to: headSha,
+        checkpointBefore: "",
+        ancestry: "",
+        sourceRun: "",
+        fingerprint: "",
+      },
+      seen
+    );
+
+  if (!enabled) return full("disabled");
+  if (!sticky) return full("sticky_disabled");
+  if (fullReview) return full("manual_full_review");
+  if (EVENT_FULL_SCOPE.has(eventAction)) return full("event_full_scope");
+
+  const seenComment =
+    read || (await readCheckpointComment({ github, owner, repo, prNumber, appSlug, log }));
+  if (seenComment.reason !== "ok") return full(seenComment.reason);
+
+  const p = seenComment.payload;
+  const seen = {
+    checkpointBefore: typeof p.head === "string" ? p.head : "",
+    sourceRun: typeof p.run === "string" ? p.run : "",
+    fingerprint: typeof p.fingerprint === "string" ? p.fingerprint : "",
+  };
+
+  const invalid = validateCheckpointPayload(p, { prNumber });
+  if (invalid) {
+    log(`[checkpoint] marker rejected (${invalid}); reviewing the full range.`);
+    return full("schema_invalid", seen);
+  }
+  // The base moved (branch advanced, rebase, different base ref): the diff basis
+  // is no longer the one the checkpoint was taken against, so nothing about the
+  // earlier review carries over.
+  if (p.base_ref !== baseRef || p.merge_base !== mergeBase) return full("base_changed", seen);
+  // Model/prompt/rules/version changed: earlier findings are not comparable.
+  if (p.fingerprint !== fingerprint) return full("config_changed", seen);
+
+  let status;
+  try {
+    status = await isAncestor(p.head, headSha);
+  } catch (e) {
+    log(`[checkpoint] ancestry check failed (${e.message}); reviewing the full range.`);
+    return full("resolver_error", seen);
+  }
+  if (status === 1) return full("not_ancestor", Object.assign({ ancestry: "not_ancestor" }, seen));
+  if (status === 128) return full("unknown_object", Object.assign({ ancestry: "unknown_object" }, seen));
+  if (status !== 0) return full("resolver_error", Object.assign({ ancestry: "error" }, seen));
+
+  return {
+    mode: "checkpoint",
+    // Re-running without pushing (manual re-run, or a second workflow trigger on
+    // the same sha) leaves nothing to review. Reviewing the empty range would
+    // still rewrite the sticky summary into "No comments generated", erasing the
+    // previous run's findings, so this gets its own reason and the posting step
+    // leaves the existing summary alone.
+    reason: p.head === headSha ? "same_head_noop" : "ok",
+    from: p.head,
+    to: headSha,
+    checkpointBefore: p.head,
+    ancestry: "ancestor",
+    sourceRun: seen.sourceRun,
+    fingerprint: p.fingerprint,
+  };
+}
+
+module.exports = {
+  runPostReviewComments,
+  postSummary,
+  findExistingSummaryComment,
+  findSummaryIssueComment,
+  ensureSummaryAnchor,
+  finalizeSummary,
+  listExistingReviewComments,
+  getAuthenticatedLogin,
+  isBotComment,
+  overlapsHistory,
+  lineSpan,
+  sameCommentSpan,
+  resolveThreshold,
+  DEFAULT_OVERLAP_THRESHOLD,
+  computeRetryDelayMs,
+  getHeader,
+  logRateLimitQuota,
+  parseNonNegInt,
+  withRetry,
+  readWithPacing,
+  readAllPages,
+  findExistingBatchReview,
+  getPostedCommentIds,
+  isCommentAlreadyPosted,
+  newCommentId,
+  sanitizeMetadata,
+  buildBadge,
+  buildPolicy,
+  routeComment,
+  formatComment,
+  formatCommentMarkdown,
+  buildSummaryBody,
+  buildPreReviewSummaryBody,
+  formatSummaryComments,
+  formatWarnings,
+  fencedBlock,
+  safeFence,
+  tailForComment,
+  MAX_COMMENT_STDERR_CHARS,
+  SUMMARY_MARKER,
+  NO_LINE_REASON,
+  resolveBatchSize,
+  sortToSendDeterministically,
+  chunkArray,
+  setStatsOutputs,
+  DEFAULT_BATCH_SIZE,
+  buildRunTags,
+  buildBadgeImage,
+  SEVERITY_BADGE_COLOR,
+  NO_ROUTING,
+  CATEGORIES,
+  SEVERITIES,
+  SEVERITY_RANK,
+  parseDiffHunkRanges,
+  classifyCommentAgainstDiff,
+  describeCommentLocation,
+  isLineResolutionFailure,
+  cooldownAndReconcile,
+  getPrDiffHunks,
+  buildCheckpointMarker,
+  parseCheckpointMarker,
+  validateCheckpointPayload,
+  readCheckpointComment,
+  resolveCheckpointRange,
+  isCheckpointAuthorOurs,
+  preserveCheckpointMarker,
+  CHECKPOINT_VERSION,
+  listBotReviewThreads,
+  shouldResolveThread,
+  resolveOutdatedThreads,
+  classifyResolveError,
+  MAX_RESOLVE_PER_RUN,
+};
