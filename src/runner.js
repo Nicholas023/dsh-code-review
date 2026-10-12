@@ -151,12 +151,13 @@ export function buildReviewArgs(opts) {
  * @param {object} opts
  * @param {string} opts.bin   引擎二进制路径。
  * @param {string[]} opts.args 参数。
- * @param {number}  [opts.timeoutMs] 进程超时兜底（默认 30 分钟——后台任务语义，
- *                                   只防死循环挂死，不设紧限制拒绝慢模型）。
+ * @param {number}  [opts.timeoutMs] 进程级兜底（默认 6 小时——2026-10-13 起
+ *                                   用户拍板「取消超时」：不再 30 分钟截断慢
+ *                                   模型/大仓库，此值只防引擎死循环占死 serve）。
  * @param {object}  [opts.env]      额外环境变量（provider 注入位，步骤 5）。
  * @returns {Promise<{ok: boolean, code: number|null, stdout: string, stderr: string, timedOut?: boolean}>}
  */
-export function runEngine({ bin, args, timeoutMs = 30 * 60 * 1000, env = {} }) {
+export function runEngine({ bin, args, timeoutMs = 6 * 60 * 60 * 1000, env = {} }) {
   return new Promise((resolvePromise) => {
     let stdout = '';
     let stderr = '';

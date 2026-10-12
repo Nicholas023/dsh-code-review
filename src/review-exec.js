@@ -22,6 +22,14 @@ import { createModelSource } from './model-provider.js';
 import { resolveApiKey, isKeyMissing } from './credentials.js';
 
 /**
+ * 引擎侧 LLM **单请求**超时（毫秒）：与任务级进程兜底 review_timeout_ms 解耦
+ * （2026-10-13 用户拍板「取消超时」后，任务整体不再有 30 分钟截断——慢模型/
+ * 大仓库跑多久都行；但单个 LLM 请求仍需防端点悬挂，挂死不响应的单请求若无限
+ * 等会占死整个任务）。折算为秒注入 OCR_LLM_TIMEOUT（见 prepareEngineEnv）。
+ */
+const OCR_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
  * 执行一次评审（引擎 → 模型端点/key → 运行 → 点名 → 报告）。
  *
  * @param {object} task 任务描述：
@@ -83,7 +91,7 @@ export async function executeReview(task) {
     if (isKeyMissing(key)) {
       modelNote = `评审模型 ${endpoint.providerLabel} 的凭据（${endpoint.keyEnv}）未找到：请配置环境变量或在 DSH 凭据文件中登记。`;
     } else {
-      const prep = prepareEngineEnv({ endpoint, key, timeoutMs: cfg.review_timeout_ms });
+      const prep = prepareEngineEnv({ endpoint, key, timeoutMs: OCR_REQUEST_TIMEOUT_MS });
       engineEnv = prep.env;
       if (prep.injected) modelNote = prep.note;
     }
@@ -101,7 +109,10 @@ export async function executeReview(task) {
   const sensitiveBlock = buildSensitiveBlock(pendingPaths);
 
   // 6. 落报告（失败不阻断）。
-  const body = [
+  // ⚠ body 是累加拼接的目标（上面 join 后还要追加 stderr/敏感块），必须 let——
+  // 写成 const 会在「引擎失败且有 stderr」时抛 Assignment to constant variable，
+  // 直接把整次评审打成 failed（2026-10-13 真实仓库 实测踩坑）。
+  let body = [
     '# 代码审查报告',
     '',
     `- 仓库: ${repoNameOf(task.repoPath || '')}`,

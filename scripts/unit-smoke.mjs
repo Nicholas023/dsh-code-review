@@ -259,8 +259,8 @@ t('buildReviewArgs：excludePaths → 每个 --exclude <p>（scan 全仓库时�
   assert.ok(!plain.includes('--exclude'));
 });
 
-t('DEFAULT_CONFIG.review_timeout_ms：后台任务语义放宽到 30 分钟（容忍慢模型）', () => {
-  assert.equal(DEFAULT_CONFIG.review_timeout_ms, 30 * 60 * 1000);
+t('DEFAULT_CONFIG.review_timeout_ms：进程级兜底放宽到 6 小时（2026-10-13 用户拍板取消严格超时，只防挂死）', () => {
+  assert.equal(DEFAULT_CONFIG.review_timeout_ms, 6 * 60 * 60 * 1000);
 });
 
 t('task-book：入队/读/更新/列表 状态机 + 原子落盘（隔离目录，不碰生产任务簿）', async () => {
@@ -293,6 +293,10 @@ t('task-book：入队/读/更新/列表 状态机 + 原子落盘（隔离目录�
     assert.equal(done.status, 'done');
     assert.equal(done.result.ok, true);
     // listTasks：倒序（后创建的排前面）且能读出状态。
+    // ⚠ 同一秒内创建的两个任务文件名时间戳前缀相同，字典序由 4 位随机后缀
+    //   决定、先后无保证（task-api-smoke 已踩同一坑）——这里等 1.05s 让 id2
+    //   的时间戳一定大于 id，倒序断言才稳定。
+    await new Promise((r) => setTimeout(r, 1050));
     const id2 = tb.enqueueTask({ repoPath: '/r2' });
     const list = tb.listTasks(10);
     assert.equal(list[0].id, id2);

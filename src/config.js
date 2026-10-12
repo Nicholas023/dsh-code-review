@@ -30,10 +30,12 @@ export const DEFAULT_CONFIG = {
   engine_bin: '',
   // 首启引导标记：true 表示尚未引导确认，apply 时输出引导消息。
   first_run: true,
-  // 评审超时（毫秒）：后台任务语义（2026-10-13 起）——进程级兜底上限，
-  // 默认 30 分钟宽容慢模型；前台不阻塞、会话无超时，此值只防任务死循环挂死。
-  // （引擎侧 OCR_LLM_TIMEOUT 单请求超时由 prepareEngineEnv 折算同一字段。）
-  review_timeout_ms: 30 * 60 * 1000,
+  // 评审进程级兜底（毫秒）：后台任务语义（2026-10-13 起）——**不再设严格时限**。
+  // 前台不阻塞、会话无超时；评审慢模型/大仓库跑多久都行，此值只防引擎死循环
+  // 把 serve 单例占死，故放宽到 6 小时（仅兜底，不截断正常评审）。
+  // 引擎侧 OCR_LLM_TIMEOUT（**单请求**超时）已与任务整体解耦，独立默认 600s
+  // 防 LLM 端点悬挂，见 review-exec.js 的 OCR_REQUEST_TIMEOUT_MS。
+  review_timeout_ms: 6 * 60 * 60 * 1000,
 };
 
 /**
