@@ -1,0 +1,55 @@
+{
+  "name": "dsh-code-review",
+  "version": "0.1.0",
+  "description": "智能代码审查插件：把引擎 codecheck（open-code-review 的 fork）接入 DSH —— 对仓库 diff/扫描执行安全脱敏、找 bug、冗余与无关代码三个固定视角的评审，会话内返回问题清单并落一份报告文件留档。默认沿用会话模型（DeepSeek-V41-Flash），设置面板可另选 DSH 中已配置的评审模型。",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client.js",
+    "./std-facet": "./std-facet.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "client.js",
+    "std-facet.js",
+    "dsh-plugin.json",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/settings-schema.js && node --check src/runner.js && node --check src/report.js && node --check src/sensitive-list.js && node --check client.js && node --check std-facet.js",
+    "smoke": "node scripts/cordis-entry-smoke.mjs",
+    "unit": "node scripts/unit-smoke.mjs",
+    "selfcheck": "node scripts/cordis-entry-smoke.mjs && node scripts/unit-smoke.mjs",
+    "link-deps": "node scripts/link-deps.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "code-review",
+    "codecheck",
+    "deepseek-harness",
+    "security",
+    "review"
+  ],
+  "license": "Apache-2.0",
+  "author": "dsh-code-review contributors",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2"
+  }
+}
