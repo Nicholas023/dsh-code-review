@@ -11,7 +11,7 @@
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, basename, resolve } from 'node:path';
+import { join, basename, resolve, dirname } from 'node:path';
 
 /**
  * 展开用户主目录（~ 前缀）为绝对路径。
@@ -71,7 +71,8 @@ export function reportFilePath({ reportDir, repoPath, now = new Date() }) {
 export async function writeReport({ reportDir, repoPath, body, now }) {
   try {
     const path = reportFilePath({ reportDir, repoPath, now });
-    await mkdir(expandHome(reportDir), { recursive: true });
+    // 目标是 报告根/日期/文件名 —— 逐级建目录（含日期子目录）。
+    await mkdir(dirname(path), { recursive: true });
     await writeFile(path, body, 'utf8');
     return { ok: true, path };
   } catch (error) {

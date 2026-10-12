@@ -27,6 +27,7 @@
     "e2e-engine": "node scripts/engine-e2e-smoke.mjs",
     "e2e-plugin": "node scripts/plugin-e2e-smoke.mjs",
     "e2e-switch": "node scripts/switch-model-e2e.mjs",
+    "e2e-sensitive": "node scripts/sensitive-e2e-smoke.mjs",
     "selfcheck": "node scripts/cordis-entry-smoke.mjs && node scripts/unit-smoke.mjs",
     "link-deps": "node scripts/link-deps.mjs"
   },

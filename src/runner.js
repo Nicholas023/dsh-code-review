@@ -13,7 +13,7 @@
  * 零敏感：不包含任何平台标识；provider 注入数据全部来自 DSH 配置（ctx 取数），
  * 不经本文件写死。
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,50 @@ const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Windows 可执行扩展名。 */
 const EXE = process.platform === 'win32' ? '.exe' : '';
+
+/**
+ * 收集「待提交文件清单」（步骤 6 敏感点名的数据来源）。
+ *
+ * 语义（与 git 行为对齐）：
+ *   - untracked：`git ls-files --others --exclude-standard`（未被 .gitignore 排除的新文件）；
+ *   - modified：`git diff --name-only`（工作区改动，含未暂存）；
+ *   - staged：`git diff --cached --name-only`（已暂存）。
+ * 三者并集去重 = 发 GitHub 前「所有要过目的文件」。删除的文件不在盘上，不点名。
+ *
+ * 安全卫生：只出相对路径（文件名+目录），不读文件内容；非 git 仓库 /
+ * 命令失败 → 返回 []（点名层静默跳过，不阻断评审）。
+ *
+ * @param {string} repoPath 仓库路径（绝对或相对）。
+ * @returns {string[]} 待提交文件相对路径（正斜杠）。
+ */
+export function collectPendingPaths(repoPath) {
+  if (!repoPath) return [];
+  const run = (args) => {
+    try {
+      const r = spawnSync('git', ['-C', repoPath, ...args], { encoding: 'utf8', timeout: 15_000 });
+      if (r.status !== 0) return [];
+      return (r.stdout || '')
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const untracked = run(['ls-files', '--others', '--exclude-standard']);
+  const modified = run(['diff', '--name-only']);
+  const staged = run(['diff', '--cached', '--name-only']);
+  const seen = new Set();
+  const out = [];
+  for (const p of [...untracked, ...modified, ...staged]) {
+    const norm = String(p).replace(/\\/g, '/');
+    if (norm && !seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+  }
+  return out;
+}
 
 /**
  * 定位引擎二进制。
