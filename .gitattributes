@@ -1,0 +1,10 @@
+# 换行与二进制识别
+* text=auto
+
+# 二进制文件不参与行尾转换 / diff 文本化
+*.exe binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary

@@ -1,0 +1,54 @@
+# ============================================================
+# dsh-code-review .gitignore
+# 本项目主题是「代码审查 / 防开盒」——敏感文件模式本仓库自身
+# 就必须第一个遵守：任何密钥 / 凭据 / 隐私资料严禁进入版本历史。
+# ============================================================
+
+# ---------- 敏感信息（红线，一个都不允许进历史） ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_dsa
+id_ed25519
+.credentials.yaml
+*.credentials.yaml
+credentials
+.secrets
+
+# ---------- Node / DSH 插件 ----------
+node_modules/
+dist/
+build/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Go 引擎构建产物 ----------
+engine/bin/
+*.exe
+*.test
+coverage.out
+*.out
+
+# ---------- 运行时产物 ----------
+# 评审报告留档（按日期/仓库存放）为运行时产物，不入库
+reports/
+tmp/
+
+# ---------- 系统 / 编辑器 ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.tmp
+*.bak

@@ -1,0 +1,21 @@
+# 编辑器统一约定：缩进 / 换行 / 编码
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{ts,js,jsx,tsx,json,yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.go]
+indent_style = tab
+
+[Makefile]
+indent_style = tab
