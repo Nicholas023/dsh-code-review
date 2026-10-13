@@ -21,13 +21,13 @@
 
 ## 评审模型
 
-- 默认**沿用会话模型**（DSH 官方 deepseek-account 的 `deepseek-flash` / DeepSeek-V41-Flash，
+- 默认**沿用会话模型**（DSH 官方默认的 `deepseek-flash` / DeepSeek-V41-Flash，
   凭据走 DSH 既有通道，无需手工配置）；
 - **另选**评审模型（异构评审：写代码的模型与审查的模型不同，「错」不一起错）：
   用原生工具 `code_review_set_config`（会话里说「把评审模型改成 X」自动触发）写入插件
   自有配置文件 `~/.dsh/dsh-code-review/plugin-config.json`，写入即生效（无需重启）；
   模型标识 = DSH 模型配置里已有的模型名（选项动态读取 DSH 模型配置体系
-  ——  与  的 providers/models，含 thinkingFormat；
+  —— 官方账号与副账号等已配置的 providers/models，含 thinkingFormat；
   其他模型需先在 DSH 侧配好，不硬编码）。
 - ⚠️ 设置面板「智能代码审查」分区的同名字段**暂不生效**（2026-10-13 实测：
   0.2.0 宿主「面板保存」对第三方 bundle 插件只写组合树文件、不回传运行层）——

@@ -52,3 +52,13 @@ Desktop.ini
 *.swp
 *.tmp
 *.bak
+
+# ---------- 内部开发文档（本地保留，不进公开仓库） ----------
+# 这些是本项目开发过程文档 / 侦查产物，发布仓库只含最简可发布文件集。
+AGENTS.md
+.md
+-代码审查插件开发.md
+docs/
+scripts/-config.mjs
+_asar-*
+_asar-out/

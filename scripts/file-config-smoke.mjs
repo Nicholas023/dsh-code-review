@@ -36,7 +36,7 @@ function ok(name, cond, detail = '') {
 ok('缺失文件读空', JSON.stringify(readFileConfig()) === '{}');
 
 // ② 白名单过滤 + 类型校验
-const written = writeFileConfig({ review_model: 'REVIEW_MODEL_A', bad_key: 99, engine_bin: 123, report_dir: '~/r' });
+const written = writeFileConfig({ review_model: ' REVIEW_MODEL_A ', bad_key: 99, engine_bin: 123, report_dir: '~/r' });
 ok('写入过滤未知键', !('bad_key' in written) && !('engine_bin' in written), JSON.stringify(written));
 ok('值 trim 后落盘', written.review_model === 'REVIEW_MODEL_A', JSON.stringify(written));
 const onDisk = JSON.parse(readFileSync(PLUGIN_CONFIG_FILE, 'utf8'));
