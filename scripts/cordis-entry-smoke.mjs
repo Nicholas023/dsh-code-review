@@ -136,10 +136,11 @@ try {
 }
 
 check(
-  '注册了 code_review 与 code_review_status 两个工具（后台任务形态）',
-  Array.isArray(registeredTools) && registeredTools.length === 2
+  '注册了 code_review / code_review_status / code_review_set_config 三个工具（后台任务形态 + 配置入口）',
+  Array.isArray(registeredTools) && registeredTools.length === 3
     && registeredTools.some((t) => t?.name === 'code_review')
-    && registeredTools.some((t) => t?.name === 'code_review_status'),
+    && registeredTools.some((t) => t?.name === 'code_review_status')
+    && registeredTools.some((t) => t?.name === 'code_review_set_config'),
   JSON.stringify(registeredTools.map((t) => t?.name))
 );
 

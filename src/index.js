@@ -18,6 +18,8 @@
  * 零敏感：本文件不硬编码任何平台内部标识；评审模型选项动态来自 DSH 配置。
  */
 import { normalizeConfig, pickOverrides, DEFAULT_CONFIG, SETTINGS_NS } from './config.js';
+import { readFileConfig } from './file-config.js';
+import { createSetConfigTool, SET_CONFIG_TOOL_NAME } from './set-config-tool.js';
 import { createSettingsSchema } from './settings-schema.js';
 import { locateEngineBin, buildReviewArgs, runEngine, probeEngineVersion, prepareEngineEnv, collectPendingPaths } from './runner.js';
 import { writeReport, repoNameOf } from './report.js';
@@ -523,23 +525,29 @@ function mountTaskApi(ctx, disposers) {
  * @returns {Function|void} 卸载函数（若有需清理的资源）。
  */
 export function apply(ctx, configRaw) {
-  // 运行时配置真源 = entry config（0.2.0 通道，configForms 保存后即回传 patch、
-  // volatile 字段为可热更新包装对象，须**每次读取时重新解包**才能拿到最新值，
-  // 照宿主范式「调用方每次读取配置都经 pickOverrides」范式——不能只在启动时解包一次）。
-  const entryConfig = () => normalizeConfig(pickOverrides(configRaw));
-  // 兜底 sourceGetter：settings 服务未就绪时仅 entry 配置（含默认值兜底）。
+  // 运行时配置真源 = 三层合并（低 → 高）：
+  //   ① 宿主 entry（configRaw，0.2.0 configForms 通道，volatile 字段为可热更新
+  //      包装对象，须**每次读取时重新解包**——照宿主范式「调用方每次读取配置都经
+  //      pickOverrides」范式，不能只在启动时解包一次）；
+  //   ② settings 命名空间快照（0.1.x 通道保底，尽力读取）；
+  //   ③ 插件自有配置文件 plugin-config.json（**运行真源**，2026-10-13 加）：
+  //      0.2.0-rc.2 宿主「面板保存」对第三方 bundle 插件不回传 entry config（实测
+  //      只写 cordis.yml/patch.yml、无 settings 快照、apply 收全默认——见
+  //      「配置-运行时脱节」），故由 code_review_set_config 工具/人工编辑写入本文件，
+  //      getConfig 每次调用都重新读（热生效，无需重启），优先级最高。
+  const entryConfig = () => normalizeConfig({ ...pickOverrides(configRaw), ...readFileConfig() });
+  // 兜底 sourceGetter：settings 服务未就绪时仅 entry + 文件层（含默认值兜底）。
   let sourceGetter = entryConfig;
   const getConfig = () => sourceGetter();
   ctx.inject(['settings'], (sctx) => {
-    // settings 服务就绪后：entry config 优先，0.1.x settings 命名空间快照仅作补充覆盖。
+    // settings 服务就绪后：文件层优先，其次宿主 entry，0.1.x settings 快照仅补充。
     sourceGetter = () => {
       try {
         const snapshot = sctx.settings.get?.(SETTINGS_NS);
-        if (!snapshot || typeof snapshot !== 'object') return entryConfig();
-        // entry 覆盖快照：0.2.0 面板保存的字段优先（用户最新操作），快照补 entry 未显式设置的字段。
-        return normalizeConfig({ ...snapshot, ...pickOverrides(configRaw) });
+        const base = snapshot && typeof snapshot === 'object' ? snapshot : {};
+        return normalizeConfig({ ...base, ...pickOverrides(configRaw), ...readFileConfig() });
       } catch {
-        /* 读快照/解包失败回退 entry 配置 */
+        /* 读快照/解包失败回退 entry + 文件层 */
         return entryConfig();
       }
     };
@@ -563,6 +571,11 @@ export function apply(ctx, configRaw) {
       disposers.push(ctx.tools.register(createStatusTool(ctx, getConfig)));
     } catch (error) {
       ctx.logger?.warn?.(`[dsh-code-review] ${STATUS_TOOL_NAME} 工具注册失败：${String(error?.message ?? error)}`);
+    }
+    try {
+      disposers.push(ctx.tools.register(createSetConfigTool(ctx, getConfig)));
+    } catch (error) {
+      ctx.logger?.warn?.(`[dsh-code-review] ${SET_CONFIG_TOOL_NAME} 工具注册失败（配置仅走默认）：${String(error?.message ?? error)}`);
     }
   });
 

@@ -23,9 +23,16 @@
 
 - 默认**沿用会话模型**（DSH 官方 deepseek-account 的 `deepseek-flash` / DeepSeek-V41-Flash，
   凭据走 DSH 既有通道，无需手工配置）；
-- 设置面板「智能代码审查」分区可**另选**评审模型（选项动态读取 DSH 模型配置体系
+- **另选**评审模型（异构评审：写代码的模型与审查的模型不同，「错」不一起错）：
+  用原生工具 `code_review_set_config`（会话里说「把评审模型改成 X」自动触发）写入插件
+  自有配置文件 `~/.dsh/dsh-code-review/plugin-config.json`，写入即生效（无需重启）；
+  模型标识 = DSH 模型配置里已有的模型名（选项动态读取 DSH 模型配置体系
   ——  与  的 providers/models，含 thinkingFormat；
-  其他模型需先在 DSH 侧配好，选项自动跟随，不硬编码）。
+  其他模型需先在 DSH 侧配好，不硬编码）。
+- ⚠️ 设置面板「智能代码审查」分区的同名字段**暂不生效**（2026-10-13 实测：
+  0.2.0 宿主「面板保存」对第三方 bundle 插件只写组合树文件、不回传运行层）——
+  面板字段保留注册，宿主回传通道修复后自动启用；当前以
+  `code_review_set_config` 工具 / 插件配置文件为运行真源。
 
 **喂参机制（OCR-managed）**：插件运行时把评审模型解析成
 `OCR_LLM_URL / OCR_LLM_TOKEN / OCR_LLM_MODEL / OCR_LLM_PROTOCOL / OCR_LLM_TIMEOUT`
@@ -58,8 +65,8 @@ DSH 凭据 seam；key 只进子进程环境，**不落盘、不进日志**）。
        - id: dsh-code-review
          name: 'dsh-code-review'
    ```
-3. 引擎 codecheck：把编译产物放到插件包 `bin/codecheck(.exe)`，或在设置面板
-   指定 `engine_bin` 绝对路径。
+3. 引擎 codecheck：把编译产物放到插件包 `bin/codecheck(.exe)`，或经工具
+   `code_review_set_config` 的 `engine_bin` 指定绝对路径。
 
 ## 开发
 
@@ -70,14 +77,14 @@ npm run unit                         # 确定性模块自检（28 项，不联�
 npm run smoke                        # Cordis 入口冒烟自检（挂载前提验证）
 npm run e2e-engine                   # 引擎侧端到端（真实 DeepSeek 官方评审，需本机凭据）
 npm run e2e-plugin                   # 插件管道端到端（model-provider→credentials→runner）
-npm run e2e-switch                   # 切模型端到端（默认取本机 DSH 配置中的任一模型 id，实证「面板另选也通」）
+npm run e2e-switch                   # 切模型端到端（默认取本机 DSH 配置中的任一模型 id，实证「另选模型也通」）
 npm run e2e-sensitive                # 敏感文件点名层端到端（判据⑥：含 .env 仓库 → 报告点名）
 npm run selfcheck                    # unit + smoke 全量
 ```
 
 > e2e 会调用真实评审 API（约 10-50s / 次、数千 token），在 CI/无凭据环境会自动
 > 判失败并给出明确原因。切模型实证默认模型可经命令行参数替换：`node scripts/switch-model-e2e.mjs <模型id>`
-> （模型 id 以本机 DSH 配置为准，即设置面板「评审模型」选择器里的选项）。
+> （模型 id 以本机 DSH 配置为准，即 `code_review_set_config` 的 review_model 取值）。
 
 ## 许可
 
