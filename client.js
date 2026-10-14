@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
      * scripts/client-bundle-smoke.mjs 会做「界面字段 ≡ schema 键」双向一致性断言，
      * 字段数量或键名不一致会被拦下）。
      * group: common=常用（默认可见） / advanced=高级选项。
+     * type: text=文本框 / boolean=开关 / number=数字输入（并发广度）。
      */
     const FIELDS = [
       {
@@ -55,6 +56,18 @@ window.__ModuleLoader__.load({
         hint: '评审报告按 日期/仓库 落盘的根目录；留空用默认值。',
         placeholder: '~/dsh-code-review-reports',
       },
+      // 并发评审（2026-10-14 迭代）：默认关 = 单线；开启 = 并行。成本控制权在用户：
+      // 开关 + 并发广度（条件展开）两字段，保存时同时写宿主表单与插件运行真源
+      // （POST /api/code-review/config → plugin-config.json，见 save()）。
+      {
+        key: 'concurrency_enabled', type: 'boolean', group: 'common', label: '并发评审',
+        hint: '关闭 = 单线顺序审查（默认）。开启 = 并行审查、提速明显，但 token 消耗随之增加（成本由你控制）。',
+      },
+      {
+        key: 'concurrency', type: 'number', group: 'common', label: '并发广度',
+        hint: '并行审查的会话数（1–32，默认 8）。越大越快，但 token 消耗与端点限流风险越高。',
+        placeholder: '8', min: 1, max: 32,
+      },
       {
         key: 'engine_bin', type: 'text', group: 'advanced', label: '引擎路径（可选）',
         hint: 'codecheck 可执行文件路径；留空自动在 PATH 查找。',
@@ -65,6 +78,21 @@ window.__ModuleLoader__.load({
         hint: '勾选时首次评审会附带引擎安装指引；评审过一次后自动关闭。',
       },
     ];
+
+    /** 按 key 取字段定义（条件展开 / 保存逻辑用）。 */
+    const FIELD_BY_KEY = Object.fromEntries(FIELDS.map((f) => [f.key, f]));
+
+    /** 并发广度取值域（与服务端 src/config.js 的 CONCURRENCY_* 常量对齐）。 */
+    const CONCURRENCY_DEFAULT = 8;
+    const CONCURRENCY_MIN = 1;
+    const CONCURRENCY_MAX = 32;
+
+    /** 并发广度钳制：1..32 整数；非有限（含空串/乱填）回退默认 8。 */
+    function clampConcurrency(v) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return CONCURRENCY_DEFAULT;
+      return Math.min(CONCURRENCY_MAX, Math.max(CONCURRENCY_MIN, Math.round(n)));
+    }
 
     /** 字段分组（渲染顺序 = 数组顺序）。 */
     const GROUPS = [
@@ -210,11 +238,37 @@ window.__ModuleLoader__.load({
             if (field.type === 'boolean') {
               // 勾选 = 显式 true；取消勾选 = 清除覆盖（回落默认）
               ok = raw ? await form.set(field.key, true) : await form.unset(field.key);
+            } else if (field.type === 'number') {
+              // 并发广度：空 = 清除覆盖（回落默认 8）；非空 = 钳制 1..32 后写入数字值。
+              const trimmed = toText(raw).trim();
+              ok = trimmed === '' ? await form.unset(field.key) : await form.set(field.key, clampConcurrency(trimmed));
             } else {
               const parsed = parseText(field, raw);
               ok = parsed === undefined ? await form.unset(field.key) : await form.set(field.key, parsed);
             }
             if (!ok) throw new Error('保存被 Host 拒绝：' + field.key);
+          }
+          // 并发两字段同步写运行真源（2026-10-14 迭代）：0.2.0 宿主「面板保存」对
+          // 第三方插件不回传运行层（2026-10-13 实测定案），只写宿主表单 = 开关摆设；
+          // 这里 POST /api/code-review/config → 插件 webServer 路由 → plugin-config.json，
+          // 下一次评审 getConfig 热读取立即生效。成本旋钮写失败必须明示用户。
+          const ccEnabledField = FIELD_BY_KEY['concurrency_enabled'];
+          const ccField = FIELD_BY_KEY['concurrency'];
+          const ccPatch = {};
+          if (Object.prototype.hasOwnProperty.call(draft, ccEnabledField.key)) {
+            ccPatch.concurrency_enabled = Boolean(draft[ccEnabledField.key]);
+          }
+          if (Object.prototype.hasOwnProperty.call(draft, ccField.key)) {
+            const trimmed = toText(draft[ccField.key]).trim();
+            ccPatch.concurrency = trimmed === '' ? null : clampConcurrency(trimmed);
+          }
+          if (Object.keys(ccPatch).length > 0) {
+            const resp = await window.fetch('/api/code-review/config', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(ccPatch),
+            });
+            if (!resp.ok) throw new Error('界面已保存，但并发设置运行层写入失败（HTTP ' + resp.status + '，webServer 路由不可用？）');
           }
           setDraft(null);
           setSavedAt(new Date());
@@ -236,6 +290,18 @@ window.__ModuleLoader__.load({
         setError(null);
         try {
           for (const field of FIELDS) await form.unset(field.key);
+          // 并发两字段同步清空运行真源（恢复默认：单线 + 并发广度 8）。
+          // 清理失败只提示不抛——界面恢复默认本身已成功，成本旋钮下次保存会重写。
+          try {
+            const resp = await window.fetch('/api/code-review/config', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ concurrency_enabled: null, concurrency: null }),
+            });
+            if (!resp.ok) setError('界面已恢复默认，但并发设置运行层清理失败（HTTP ' + resp.status + '）');
+          } catch (err) {
+            setError('界面已恢复默认，但并发设置运行层清理失败：' + String((err && err.message) || err));
+          }
           setDraft(null);
           setSavedAt(new Date());
         } catch (err) {
@@ -267,6 +333,27 @@ window.__ModuleLoader__.load({
             )
           ];
         }
+        if (field.type === 'number') {
+          // 数字输入（并发广度）：HTML number 控件 + 1..32 约束；编辑仍走文本草稿。
+          return [
+            h('div', { key: field.key + '-label' },
+              h('div', null, field.label),
+              field.hint ? h('div', { className: 'dcr-hint' }, field.hint) : null
+            ),
+            h('input', {
+              key: field.key + '-input',
+              className: 'dcr-input',
+              type: 'number',
+              min: field.min ?? CONCURRENCY_MIN,
+              max: field.max ?? CONCURRENCY_MAX,
+              step: 1,
+              value: toText(shown(field)),
+              disabled: !writable || busy,
+              placeholder: field.placeholder || '（默认）',
+              onChange: (event) => edit(field, event.target.value)
+            })
+          ];
+        }
         return [
           h('div', { key: field.key + '-label' },
             h('div', null, field.label),
@@ -284,9 +371,15 @@ window.__ModuleLoader__.load({
         ];
       };
 
-      /** 渲染一组字段（字段按 GROUPS 顺序平铺，不做折叠加搜索——四项设置足够少）。 */
+      /** 渲染一组字段（字段按 GROUPS 顺序平铺；并发广度按开关条件展开）。 */
       const renderGroup = (group) => {
-        const fields = FIELDS.filter((field) => field.group === group.id);
+        // 条件展开（2026-10-14 用户拍板 UI 形态）：默认只显示「并发评审」开关；
+        // 开关开启后才展开「并发广度」设置项。concurrency_enabled 本身恒显示。
+        const switchField = FIELD_BY_KEY['concurrency_enabled'];
+        const concurrencyOn = switchField ? Boolean(shown(switchField)) : false;
+        const fields = FIELDS
+          .filter((field) => field.group === group.id)
+          .filter((field) => field.key !== 'concurrency' || concurrencyOn);
         if (fields.length === 0) return null;
         const groupSet = fields.filter(hasValue).length;
         return h('div', { key: group.id },
@@ -325,7 +418,8 @@ window.__ModuleLoader__.load({
         ),
         h('p', { className: 'dcr-note' },
           '引擎 codecheck 未就绪时，会在会话侧给出安装提示；',
-          '评审模型选项 = DSH 模型设置里已配置的模型（沿用会话模型为默认）。'
+          '评审模型选项 = DSH 模型设置里已配置的模型（沿用会话模型为默认）。',
+          '并发评审默认关闭（单线）；开启后并发广度 1–32，并行多路会成倍增加 token 消耗，成本由你控制。'
         )
       );
     }

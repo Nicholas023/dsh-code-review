@@ -44,7 +44,8 @@ const OCR_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
  *   - {string[]} [task.excludePaths] 排除路径（--exclude，如 engine/**）。
  *   - {string[]} [task.pendingPaths] 待提交文件清单（敏感点名；缺省自动收集）。
  *   - {object} [task.config]    配置覆盖：review_model / report_dir /
- *                               engine_bin / review_timeout_ms（缺省取默认值）。
+ *                               engine_bin / review_timeout_ms /
+ *                               concurrency_enabled / concurrency（缺省取默认值）。
  * @returns {Promise<object>} {
  *   ok, code, stdout, stderr, timedOut, elapsedSec,
  *   reportPath, modelNote, sensitiveBlock
@@ -69,7 +70,7 @@ export async function executeReview(task) {
     };
   }
 
-  // 2. 组装引擎参数（含排除路径）。
+  // 2. 组装引擎参数（含排除路径、并发设置——并发由设置面板控制，见 config.js）。
   const engineArgs = buildReviewArgs({
     command: task.command === 'scan' ? 'scan' : 'review',
     mode: task.command === 'scan' ? undefined : task.mode,
@@ -79,6 +80,8 @@ export async function executeReview(task) {
     focus: task.focus,
     repoPath: task.repoPath,
     excludePaths: task.excludePaths,
+    concurrencyEnabled: cfg.concurrency_enabled === true,
+    concurrency: cfg.concurrency,
   });
 
   // 3. 评审模型解析 + key 注入（零落盘：key 只进子进程 env）。
@@ -120,6 +123,8 @@ export async function executeReview(task) {
     `- 命令: codecheck ${engineArgs.join(' ')}`,
     `- 耗时: ${elapsedSec}s`,
     `- 退出码: ${result.code}`,
+    // 并发注记（2026-10-14 迭代）：留档可读「这次是怎么跑的」（单线 / N 路并行）。
+    `- 并发: ${cfg.concurrency_enabled === true ? `${cfg.concurrency} 路并行` : '单线（未开并发）'}`,
     modelNote ? `- 模型注记: ${modelNote}` : null,
     '',
     '---',

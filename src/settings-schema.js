@@ -17,6 +17,7 @@
  * 零敏感：无任何平台内部标识；模型标签一律取自 DSH 配置文本本身。
  */
 import z from '@deepseek-ai/schemastery';
+import { CONCURRENCY_DEFAULT } from './config.js';
 
 /** 本插件拥有的设置命名空间名（与 config.js 的 SETTINGS_NS 保持一致）。 */
 export const SETTINGS_NS = 'dsh-code-review';
@@ -63,6 +64,25 @@ export function createSettingsSchema(models = []) {
       .description(
         '首次启动引导标记：首次启用时插件会输出引导消息（确认评审模型沿用、确认报告目录）。' +
           '确认无误后可将此开关关闭以静默。'
+      ),
+    // 并发评审（2026-10-14 迭代）：开关默认关 = 单线；开 = 并行审查。
+    // ⚠ 开启并发会显著增加 token 消耗——成本由用户自行权衡（控制权交回用户）。
+    concurrency_enabled: z
+      .boolean()
+      .default(false)
+      .description(
+        '并发评审：关闭 = 单线顺序审查（默认，引擎显式单并发）。' +
+          '开启 = 并行审查、大幅提速，但 token 消耗随之增加（成本由你控制）。' +
+          '开启后在设置面板展开「并发广度」设置项。'
+      ),
+    // 并发广度：仅 concurrency_enabled=true 时生效；取值钳制 1..32（config.js）。
+    // schemastery 数值字段用 z.number()（宿主表单渲染数字输入）。
+    concurrency: z
+      .number()
+      .default(CONCURRENCY_DEFAULT)
+      .description(
+        '并发广度：并行审查的会话数（1–32，默认 8）。仅「并发评审」开启时生效；' +
+          '值越大审得越快，但 token 消耗与端点限流风险越高。'
       ),
   });
   return schema;

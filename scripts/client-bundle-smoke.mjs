@@ -150,6 +150,29 @@ check('任务卡渲染不抛（轮询降级路径安全）', !tasksRenderError &
 check('任务卡产物含「后台任务」标题', Boolean(tasksRender) && JSON.stringify(tasksRender).includes('后台任务'),
   'OK');
 
+/* ── ④b 并发字段条件展开（2026-10-14 迭代）：开关开启 → 展开「并发广度」 ──
+   注：render 的 form 来自 apply 闭包（configForms.get 固定实例），props.form 会被
+   覆盖——测开启态 = 改共享 fakeForm 快照再渲染，渲染后恢复原值。 */
+const prevValue = fakeForm.snapshot.value;
+let renderOn = null;
+let renderOnError = null;
+try {
+  fakeForm.snapshot.value = { concurrency_enabled: true };
+  renderOn = settingsCard.render({ view: 'full' });
+} catch (error) {
+  renderOnError = error;
+} finally {
+  fakeForm.snapshot.value = prevValue;
+}
+const offText = JSON.stringify(renderFull);
+const onText = JSON.stringify(renderOn ?? '');
+// 断言用渲染结构标识（concurrency-input = 并发广度数字输入的 DOM key），
+// 不用字段文案——卡片底部 note 也含「并发广度」字样，文案断言会误伤。
+check('并发开关开启：并发广度数字输入已渲染', !renderOnError && onText.includes('concurrency-input'),
+  renderOnError ? String(renderOnError?.message ?? renderOnError) : (onText.includes('concurrency-input') ? '产物含 concurrency-input' : '产物未含 concurrency-input'));
+check('并发开关关闭（默认单线）：并发广度数字输入不渲染', !offText.includes('concurrency-input'),
+  offText.includes('concurrency-input') ? '默认关时不该渲染并发广度输入' : '开关关时广度输入不渲染 ✓');
+
 /* ── ⑤ 界面字段 ≡ schema 键 双向一致性 ── */
 /**
  * 从 client.js 源码抽取 FIELDS 的 key（照 宿主范式冒烟：只认 { key: '...' } 字面量；

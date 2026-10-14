@@ -16,8 +16,12 @@
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { TASKS_ROOT, listTasks, readTask, updateTask } from './task-book.js';
+import { writeFileConfig } from './file-config.js';
 
 const LIST_LIMIT = 20;
+
+/** 配置写接口的请求体上限（设置面板只发两个小字段，4KB 足够；64KB 兜底）。 */
+const CONFIG_BODY_LIMIT = 64 * 1024;
 
 /** node:http 风格 JSON 响应。 */
 function json(res, code, body) {
@@ -27,6 +31,31 @@ function json(res, code, body) {
     'cache-control': 'no-store',
   });
   res.end(payload);
+}
+
+/**
+ * 读取请求体（宿主 webServer 透传 node http IncomingMessage，需自行收集）。
+ *
+ * @param {object} req IncomingMessage。
+ * @param {number} [limit] 字节上限；超过返回 null（调用方回 413）。
+ * @returns {Promise<string|null>} 请求体文本；超限/报错为 null。
+ */
+function readBody(req, limit = CONFIG_BODY_LIMIT) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    let tooBig = false;
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > limit) {
+        tooBig = true;
+        try {
+          req.destroy();
+        } catch { /* 忽略 */ }
+      }
+    });
+    req.on('end', () => resolve(tooBig ? null : body));
+    req.on('error', reject);
+  });
 }
 
 /** 任务簿指纹：tasks 目录内所有 <id>.json 的 文件名 + mtime + 大小 拼接。
@@ -140,6 +169,39 @@ export function createTaskRoutes() {
         }
       }, 1000);
       req.on('close', () => clearInterval(timer));
+    },
+  });
+  // 配置写路由（2026-10-14 迭代）：设置面板的「并发评审」开关/并发广度经此写入
+  // 插件自有配置文件（plugin-config.json，运行真源）——0.2.0 宿主面板保存对第三方
+  // 插件不回传运行层（2026-10-13 实测定案），并发设置必须在保存时同步落运行真源，
+  // 下一次评审 getConfig 热读取立即生效。
+  // 只收白名单键（file-config sanitizePatch），值做类型校验；不发 key/不读引擎配置。
+  routes.push({
+    kind: 'exact',
+    path: '/api/code-review/config',
+    handler: (req, res) => {
+      if (req.method !== 'POST') return json(res, 405, { error: 'method-not-allowed' });
+      readBody(req)
+        .then((body) => {
+          if (body === null) return json(res, 413, { error: 'payload-too-large' });
+          let patch;
+          try {
+            patch = JSON.parse(body || '{}');
+          } catch {
+            return json(res, 400, { error: 'bad-json' });
+          }
+          if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+            return json(res, 400, { error: 'bad-request' });
+          }
+          try {
+            const next = writeFileConfig(patch); // 白名单 + 类型校验 + 原子落盘
+            json(res, 200, { ok: true, active: next });
+          } catch (error) {
+            json(res, 500, { error: 'write-failed', detail: String(error?.message ?? error) });
+          }
+          return undefined;
+        })
+        .catch(() => json(res, 400, { error: 'bad-request' }));
     },
   });
   return routes;

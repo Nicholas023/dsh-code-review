@@ -36,27 +36,53 @@ function t(label, fn) {
 }
 
 /* ---------- 1. buildReviewArgs ---------- */
-t('review/uncommitted 默认：不带 diff 定位参数', () => {
+t('review/uncommitted 默认：不带 diff 定位参数；未开并发 = 显式单线 --concurrency 1', () => {
   const args = buildReviewArgs({ command: 'review' });
-  assert.deepEqual(args, ['review', '--audience', 'agent']);
+  assert.deepEqual(args, ['review', '--concurrency', '1', '--audience', 'agent']);
 });
 t('review/branch：--from + --to（head 缺省回退 HEAD）', () => {
   const args = buildReviewArgs({ command: 'review', mode: 'branch', headRef: 'feature/x', baseRef: 'develop' });
-  assert.deepEqual(args, ['review', '--from', 'develop', '--to', 'feature/x', '--audience', 'agent']);
+  assert.deepEqual(args, ['review', '--from', 'develop', '--to', 'feature/x', '--concurrency', '1', '--audience', 'agent']);
   const args2 = buildReviewArgs({ command: 'review', mode: 'branch', baseRef: 'main' });
-  assert.deepEqual(args2, ['review', '--from', 'main', '--to', 'HEAD', '--audience', 'agent']);
+  assert.deepEqual(args2, ['review', '--from', 'main', '--to', 'HEAD', '--concurrency', '1', '--audience', 'agent']);
 });
 t('review/commit：--commit', () => {
   const args = buildReviewArgs({ command: 'review', mode: 'commit', commit: 'abc123' });
-  assert.deepEqual(args, ['review', '--commit', 'abc123', '--audience', 'agent']);
+  assert.deepEqual(args, ['review', '--commit', 'abc123', '--concurrency', '1', '--audience', 'agent']);
 });
 t('focus → --background；repo_path → --repo', () => {
   const args = buildReviewArgs({ command: 'review', focus: '查脱敏', repoPath: 'D:/proj' });
-  assert.deepEqual(args, ['review', '--repo', 'D:/proj', '--background', '查脱敏', '--audience', 'agent']);
+  assert.deepEqual(args, ['review', '--repo', 'D:/proj', '--background', '查脱敏', '--concurrency', '1', '--audience', 'agent']);
 });
-t('scan：--repo + --audience', () => {
+t('scan：--repo + --audience（未开并发 = 单线）', () => {
   const args = buildReviewArgs({ command: 'scan', repoPath: 'D:/proj', focus: 'x' });
-  assert.deepEqual(args, ['scan', '--repo', 'D:/proj', '--background', 'x', '--audience', 'agent']);
+  assert.deepEqual(args, ['scan', '--repo', 'D:/proj', '--background', 'x', '--concurrency', '1', '--audience', 'agent']);
+});
+t('并发开启：默认广度 8（与引擎默认对齐）', () => {
+  const args = buildReviewArgs({ command: 'scan', repoPath: '/repo', concurrencyEnabled: true });
+  assert.ok(args.includes('--concurrency'));
+  assert.equal(args[args.indexOf('--concurrency') + 1], '8');
+});
+t('并发开启：指定广度 4', () => {
+  const args = buildReviewArgs({ command: 'review', mode: 'uncommitted', concurrencyEnabled: true, concurrency: 4 });
+  assert.ok(args.includes('--concurrency'));
+  assert.equal(args[args.indexOf('--concurrency') + 1], '4');
+});
+t('并发开启：越界广度钳制（100→32，0→1，非数→8）', () => {
+  const clamp = (v) => {
+    const a = buildReviewArgs({ command: 'scan', concurrencyEnabled: true, concurrency: v });
+    return a[a.indexOf('--concurrency') + 1];
+  };
+  assert.equal(clamp(100), '32');
+  assert.equal(clamp(0), '1');
+  assert.equal(clamp(-5), '1');
+  assert.equal(clamp('abc'), '8');
+});
+t('并发关闭/缺省：一律显式 --concurrency 1（防引擎默认 8 漂移）', () => {
+  const off = buildReviewArgs({ command: 'scan', concurrencyEnabled: false, concurrency: 12 });
+  assert.equal(off[off.indexOf('--concurrency') + 1], '1');
+  const absent = buildReviewArgs({ command: 'review', mode: 'commit', commit: 'a' });
+  assert.equal(absent[absent.indexOf('--concurrency') + 1], '1');
 });
 
 /* ---------- 2. 敏感路径 ---------- */
@@ -101,6 +127,9 @@ t('normalizeConfig：默认值全部兜底', () => {
   assert.equal(cfg.review_model, DEFAULT_CONFIG.review_model);
   assert.equal(cfg.first_run, true);
   assert.ok(cfg.review_timeout_ms > 0);
+  // 并发（2026-10-14 迭代）：默认关（单线）+ 广度默认 8。
+  assert.equal(cfg.concurrency_enabled, false);
+  assert.equal(cfg.concurrency, 8);
 });
 t('normalizeConfig：类型清洗与未知键剔除', () => {
   const cfg = normalizeConfig({ review_model: 123, engine_bin: '  C:/x/codecheck.exe  ', bogus_key: 1 });
@@ -111,6 +140,14 @@ t('normalizeConfig：类型清洗与未知键剔除', () => {
 t('normalizeConfig：volatile 解包（{value} 形态）', () => {
   const cfg = normalizeConfig({ first_run: { value: false } });
   assert.equal(cfg.first_run, false);
+});
+t('normalizeConfig：并发开关类型清洗 + 广度钳制 1..32', () => {
+  assert.equal(normalizeConfig({ concurrency_enabled: true }).concurrency_enabled, true);
+  assert.equal(normalizeConfig({ concurrency_enabled: 'yes' }).concurrency_enabled, false); // 非布尔 → 默认关
+  assert.equal(normalizeConfig({ concurrency: 16 }).concurrency, 16);
+  assert.equal(normalizeConfig({ concurrency: 100 }).concurrency, 32);   // 上限
+  assert.equal(normalizeConfig({ concurrency: 0 }).concurrency, 1);      // 下限
+  assert.equal(normalizeConfig({ concurrency: 'x' }).concurrency, 8);    // 非数 → 默认
 });
 
 /* ---------- 5. runEngine ---------- */

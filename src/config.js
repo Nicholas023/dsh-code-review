@@ -15,6 +15,16 @@
 export const SETTINGS_NS = 'dsh-code-review';
 
 /**
+ * 并发广度取值域（2026-10-14 迭代，用户拍板）：
+ *   - 默认 8 = 8 个会话并行审查（与引擎 agent.go `MaxConcurrency<=0 → 8` 对齐）；
+ *   - 下限 1、上限 32：1 等价单线；上限防误填把 token 成本与端点压力打爆
+ *     （vLLM 类平台并发过高会触发限流，成本控制权在用户侧设置）。
+ */
+export const CONCURRENCY_DEFAULT = 8;
+export const CONCURRENCY_MIN = 1;
+export const CONCURRENCY_MAX = 32;
+
+/**
  * 默认配置。
  * review_model 语义：
  *   - "session"（默认）= 沿用会话模型（DSH 账户体系的 DeepSeek-V41-Flash）；
@@ -36,6 +46,14 @@ export const DEFAULT_CONFIG = {
   // 引擎侧 OCR_LLM_TIMEOUT（**单请求**超时）已与任务整体解耦，独立默认 600s
   // 防 LLM 端点悬挂，见 review-exec.js 的 OCR_REQUEST_TIMEOUT_MS。
   review_timeout_ms: 6 * 60 * 60 * 1000,
+  // 并发评审开关（2026-10-14 迭代）：false = 单线顺序审查（默认，引擎显式
+  // --concurrency 1）；true = 并行审查（引擎 --concurrency <concurrency>）。
+  // ⚠ 开启并发会显著增加 token 消耗——这是用户侧成本控制问题，控制权交回用户
+  // （默认关，用户明确开才开）。
+  concurrency_enabled: false,
+  // 并发广度：并行审查的会话数（1..32，默认 8）。仅 concurrency_enabled=true
+  // 时生效；引擎 agent.go 默认 ≤0 → 8，插件层显式传值，不依赖引擎默认。
+  concurrency: CONCURRENCY_DEFAULT,
 };
 
 /**
@@ -86,6 +104,16 @@ export function normalizeConfig(raw) {
   }
   if (Number.isFinite(src.review_timeout_ms) && src.review_timeout_ms > 0) {
     cfg.review_timeout_ms = src.review_timeout_ms;
+  }
+  // 并发开关：仅接受布尔（面板/工具可能传 {value} 包装，pickOverrides 已解包）。
+  if (typeof src.concurrency_enabled === 'boolean') {
+    cfg.concurrency_enabled = src.concurrency_enabled;
+  }
+  // 并发广度：整数钳制到 [CONCURRENCY_MIN, CONCURRENCY_MAX]；非有限/越界一律回退默认。
+  // 注意顺序：钳制在「是否开启」之外独立完成——开启与否由开关决定，广度始终合法。
+  if (Number.isFinite(src.concurrency)) {
+    const n = Math.round(src.concurrency);
+    cfg.concurrency = Math.min(CONCURRENCY_MAX, Math.max(CONCURRENCY_MIN, n));
   }
   return cfg;
 }

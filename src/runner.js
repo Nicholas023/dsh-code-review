@@ -17,6 +17,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CONCURRENCY_DEFAULT, CONCURRENCY_MIN, CONCURRENCY_MAX } from './config.js';
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -119,6 +120,9 @@ export function locateEngineBin(cfg) {
  * @param {string} [opts.focus]   重点领域（→ --background）。
  * @param {string} [opts.repoPath] 仓库路径（→ --repo）。
  * @param {string[]} [opts.excludePaths] 排除路径（→ 每个 --exclude <p>；如 engine/**）。
+ * @param {boolean} [opts.concurrencyEnabled] 并发评审开关（2026-10-14 迭代）。
+ *   false（默认）= 单线顺序审查；true = 并行审查（token 消耗增加，用户侧成本控制）。
+ * @param {number} [opts.concurrency] 并发广度（1..32，默认 8）；仅开关开启时生效。
  * @returns {string[]} 参数字符串数组。
  */
 export function buildReviewArgs(opts) {
@@ -140,6 +144,19 @@ export function buildReviewArgs(opts) {
     }
   }
   if (opts.focus) args.push('--background', opts.focus);
+  // 并发（2026-10-14 迭代）：设置面板控制，成本控制权在用户。
+  //  - 未开启 → 显式 --concurrency 1（单线，行为确定；引擎 agent.go 默认 ≤0 → 8，
+  //    不传会随引擎默认漂移，违反「未开启 = 单线」的用户语义）；
+  //  - 开启   → --concurrency <n>（钳制 1..32，默认 8——与引擎默认对齐）。
+  let concurrency = CONCURRENCY_DEFAULT;
+  if (opts.concurrencyEnabled === true) {
+    if (Number.isFinite(opts.concurrency)) {
+      concurrency = Math.min(CONCURRENCY_MAX, Math.max(CONCURRENCY_MIN, Math.round(opts.concurrency)));
+    }
+  } else {
+    concurrency = CONCURRENCY_MIN; // 单线
+  }
+  args.push('--concurrency', String(concurrency));
   // 会话内返回：agent 受众 = 仅摘要（无进度噪音，干净短输出）。
   args.push('--audience', 'agent');
   return args;

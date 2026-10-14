@@ -25,6 +25,8 @@
  *  - engine_bin：引擎 codecheck 二进制路径；留空 = 插件包 bin/ 内
  *    或 PATH 中 codecheck。
  *  - first_run：首启引导标记（默认 true = 尚未引导确认）。
+ *  - concurrency_enabled：并发评审开关（默认 false = 单线；2026-10-14 加）。
+ *  - concurrency：并发广度（默认 8，合法域 1..32；仅开关开启时生效）。
  *
  * 零敏感：不硬编码任何平台内部标识；描述文案不点名任何供应商。
  *
@@ -42,4 +44,8 @@ export const Config = z.object({
   engine_bin: z.string().description('引擎 codecheck 二进制路径（留空自动探测）').volatile(),
   // 首启引导标记。
   first_run: z.boolean().description('首次运行引导').volatile(),
+  // 并发评审开关（2026-10-14 迭代）：默认关 = 单线；开 = 并行（token 消耗增加，用户侧成本控制）。
+  concurrency_enabled: z.boolean().description('并发评审（默认关 = 单线；开启 = 并行审查，token 消耗增加）').volatile(),
+  // 并发广度：仅开关开启时生效；引擎 --concurrency 取值 1..32（默认 8）。
+  concurrency: z.number().description('并发广度（1–32，默认 8；仅开启并发评审后生效）').volatile(),
 });

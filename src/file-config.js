@@ -35,6 +35,11 @@ const ALLOWED = {
   engine_bin: 'string',
   first_run: 'boolean',
   review_timeout_ms: 'number',
+  // 并发设置（2026-10-14 迭代）：面板「并发评审」开关 + 并发广度，写运行真源。
+  // 注意：concurrency 是用户侧成本控制旋钮，写入口仅设置面板（经 /api/code-review/config
+  // 路由），code_review_set_config 工具不提供该字段（控制权交回用户）。
+  concurrency_enabled: 'boolean',
+  concurrency: 'number',
 };
 
 /**

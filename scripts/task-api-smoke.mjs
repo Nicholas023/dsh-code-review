@@ -82,8 +82,8 @@ try {
   /* ── 6. 路由形状 + GET /tasks 实际响应 ── */
   const routes = api.createTaskRoutes();
   const exactPaths = routes.filter((r) => r.kind === 'exact').map((r) => r.path);
-  check('路由数组 3 条（2 精确 + 1 前缀）', routes.length === 3, JSON.stringify(routes.map((r) => r.path)));
-  check('精确路由含 /api/code-review/tasks 与 /events', exactPaths.includes('/api/code-review/tasks') && exactPaths.includes('/api/code-review/events'));
+  check('路由数组 4 条（3 精确 + 1 前缀）', routes.length === 4, JSON.stringify(routes.map((r) => r.path)));
+  check('精确路由含 /tasks、/events 与 /config', exactPaths.includes('/api/code-review/tasks') && exactPaths.includes('/api/code-review/events') && exactPaths.includes('/api/code-review/config'));
   check('前缀路由 /api/code-review/tasks/', routes.some((r) => r.kind === 'prefix' && r.path === '/api/code-review/tasks/'));
   const tasksRoute = routes.find((r) => r.path === '/api/code-review/tasks');
   let statusCode = 0;

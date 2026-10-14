@@ -29,10 +29,14 @@
   模型标识 = DSH 模型配置里已有的模型名（选项动态读取 DSH 模型配置体系
   —— 官方账号与副账号等已配置的 providers/models，含 thinkingFormat；
   其他模型需先在 DSH 侧配好，不硬编码）。
-- ⚠️ 设置面板「智能代码审查」分区的同名字段**暂不生效**（2026-10-13 实测：
-  0.2.0 宿主「面板保存」对第三方 bundle 插件只写组合树文件、不回传运行层）——
-  面板字段保留注册，宿主回传通道修复后自动启用；当前以
+- ⚠️ 设置面板「智能代码审查」分区的 `review_model` / `report_dir` / `engine_bin` / `first_run`
+  字段**暂不生效**（2026-10-13 实测：0.2.0 宿主「面板保存」对第三方 bundle 插件只写组合树文件、
+  不回传运行层）——这些字段保留注册，宿主回传通道修复后自动启用；当前以
   `code_review_set_config` 工具 / 插件配置文件为运行真源。
+- **并发评审 / 并发广度两字段为例外**（2026-10-14 迭代）：面板保存时插件经自有
+  `POST /api/code-review/config` 写通道把值直落运行真源 `~/.dsh/dsh-code-review/plugin-config.json`，
+  **正常生效**——关闭（默认）= 单线顺序审查（引擎显式 `--concurrency 1`）；开启即展开
+  「并发广度」（1–32，默认 8），并行审查大幅提速，但 token 消耗随之成倍增加（成本由用户侧控制）。
 
 **喂参机制（OCR-managed）**：插件运行时把评审模型解析成
 `OCR_LLM_URL / OCR_LLM_TOKEN / OCR_LLM_MODEL / OCR_LLM_PROTOCOL / OCR_LLM_TIMEOUT`
