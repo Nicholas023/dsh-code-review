@@ -111,7 +111,7 @@ export async function executeReview(task) {
   // 6. 落报告（失败不阻断）。
   // ⚠ body 是累加拼接的目标（上面 join 后还要追加 stderr/敏感块），必须 let——
   // 写成 const 会在「引擎失败且有 stderr」时抛 Assignment to constant variable，
-  // 直接把整次评审打成 failed（2026-10-13 真实仓库 实测踩坑）。
+  // 直接把整次评审打成 failed。
   let body = [
     '# 代码审查报告',
     '',

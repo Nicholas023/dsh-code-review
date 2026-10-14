@@ -71,7 +71,7 @@ for (const m of ['config', 'settings-schema', 'plugin-config', 'runner', 'report
 }
 
 /* ---------- 2.5 0.2.0 设置契约：插件导出 Config（configForms 表单真源） ----------
- * 宿主 describe 按 entry 读 entry.fiber.runtime.Config 投影表单（见第 11 条）；
+ * 宿主 describe 按 entry 读 entry.fiber.runtime.Config 投影表单；
  * 缺 Config 导出 → describe 无本插件行 → 客户端表单 status=unavailable 不可写。 */
 {
   let ok = false;

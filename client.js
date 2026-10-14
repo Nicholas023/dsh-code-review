@@ -1,7 +1,7 @@
 /**
  * client.js —— dsh-code-review 的 Web（浏览器）侧插件形态。
  *
- * ══ 为什么必须有这个文件（2026-10-12 生产实装踩坑）══
+ * ══ 为什么必须有这个文件（2026-10-12 客户端装载协议实测）══
  * package.json 声明了 `dsh.client: { platform: 'web' }`，宿主就会按「Web 客户端
  * 插件」协议加载本文件：期望其调用 `window.__ModuleLoader__.load({ id, factory })`
  * 注册自身（id 必须等于包名 dsh-code-review）。
@@ -13,15 +13,13 @@
  * ══ 设置通道（2026-10-12 版本升级后定稿）══
  * 本机桌面客户端已是 **0.2.0-rc.2**：客户端设置域服务 = `configForms`
  * （旧 0.1.x 的 `settingsScope.bind` 是 0.1.x 形态，0.2.0 客户端已换 configForms）。
- * 姿势对齐 宿主既有插件范式（生产实证）：
  *   - `ctx.configForms.get('dsh-code-review')` → 该插件条目的配置表单
  *     （form 数据 = 服务端 settings 文档中 ns=<插件 id> 的 section；
  *      服务端由 src/index.js registerSettings → settings.register(SETTINGS_NS, schema) 提供，
  *      SETTINGS_NS 恰等于插件条目 id 'dsh-code-review'，全链闭环）；
  *   - 本文件在「插件」页 slots `plugins.item` 注册一张**设置卡片**：
  *     顶部引导说明 + 四字段真实可写表单（暂存草稿 → 点保存才 set/unset 写入）。
- *
- * ══ 形态约束（照 vision ）══
+ * 
  *   - 手写 JS + React.createElement（不走构建），React 由浏览器模块表 require('react') 提供；
  *   - 不 require 任何宿主 UI 包（官方劝阻第三方插件依赖 @deepseek-ai/dsh-client-ui-*）；
  *   - 字段渲染必须是普通函数而不是 React 组件（宿主可能重复求值）。
@@ -118,8 +116,6 @@ window.__ModuleLoader__.load({
       .dcr-warn { color: #d33; }
     `;
 
-    /* ─────────────── 表单逻辑（照 宿主范式姿势精简） ─────────────── */
-
     /** 文本值 → 显示串（undefined/null 视为空）。 */
     function toText(value) {
       return value === undefined || value === null ? '' : String(value);
@@ -152,7 +148,7 @@ window.__ModuleLoader__.load({
       }, [form]);
 
       const value = snapshot.value ?? {};
-      /** 可写条件：Host 承载 + 状态 ready（诊断串照 宿主范式定位不可写原因）。 */
+      /** 可写条件：Host 承载 + 状态 ready。 */
       const writable = snapshot.writable && snapshot.mode === 'host' && snapshot.status === 'ready';
       const diag = 'status=' + snapshot.status + ' mode=' + snapshot.mode + ' writable=' + snapshot.writable
         + ' revision=' + (snapshot.revision === undefined ? '-' : snapshot.revision)

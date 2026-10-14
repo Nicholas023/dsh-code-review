@@ -4,7 +4,7 @@
  * 职责：把「评审模型标识」解析成引擎 codecheck 需要的 LLM 端点喂参。
  * 取数优先级（逐级回退，任何一步失败都不抛异常）：
  *   1. ctx（DSH 运行态官方取数口：ctx.llm / ctx.agentDefaultModel）——尽力而为；
- *   2. profile 配置（cordis.patch.yml 的  /  段，js-yaml 只读）；
+ *   2. profile 配置（cordis.patch.yml 的 providers 段，js-yaml 只读；按 id/结构启发式识别）；
  *   3. 静态兜底（仅 DeepSeek 官方公开端点与公开模型名，零敏感）。
  *
  * 零敏感原则：
@@ -62,10 +62,13 @@ function loadProfileLlmConfig() {
       const rows = Array.isArray(doc?.services) ? doc.services : Array.isArray(doc) ? doc : [];
       for (const row of rows) {
         if (typeof row?.id !== 'string') continue;
-        if (row.id === '' || row.id === '') {
-          candidates.push({ profile: entry.name, kind: 'deepseek', config: row.config ?? {} });
-        } else if (row.id === '' || row.id === '') {
-          candidates.push({ profile: entry.name, kind: 'pi-ai', config: row.config ?? {} });
+        const cfg = row.config ?? {};
+        // DeepSeek 为公开公司名，按 id 启发式识别官方模型段（不绑定任何特定插件 id）；
+        // 其余带 providers 结构的段作为备选模型源。
+        if (row.id.toLowerCase().includes('deepseek')) {
+          candidates.push({ profile: entry.name, kind: 'deepseek', config: cfg });
+        } else if (cfg.providers && typeof cfg.providers === 'object' && !cfg.models) {
+          candidates.push({ profile: entry.name, kind: 'alternate', config: cfg });
         }
       }
     } catch {
@@ -78,7 +81,7 @@ function loadProfileLlmConfig() {
 /**
  * 把 DSH 模型配置归一成统一路由表：
  * [{ modelId, displayLabel, providerLabel, url, keyEnv, protocol, thinkingFormat?, source }]
- * source: 'config-deepseek' | 'config-pi-ai' | 'fallback-deepseek'
+ * source: 'config-deepseek' | 'config-alternate' | 'fallback-deepseek'
  */
 function buildModelRoutes() {
   const routes = [];
@@ -118,9 +121,9 @@ function buildModelRoutes() {
     }
   }
 
-  const pi = profiles.find((p) => p.kind === 'pi-ai');
-  if (pi) {
-    const providers = pi.config.providers;
+  const alt = profiles.find((p) => p.kind === 'alternate');
+  if (alt) {
+    const providers = alt.config.providers;
     if (providers && typeof providers === 'object') {
       for (const [pname, p] of Object.entries(providers)) {
         const baseURL = typeof p?.baseURL === 'string' ? p.baseURL : '';
@@ -138,7 +141,7 @@ function buildModelRoutes() {
             keyEnv,
             protocol: engineProtocolOf(p?.api),
             thinkingFormat: compat.thinkingFormat,
-            source: 'config-pi-ai',
+            source: 'config-alternate',
           });
         }
       }

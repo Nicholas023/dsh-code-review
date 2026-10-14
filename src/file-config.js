@@ -4,7 +4,7 @@
  * 背景（2026-10-13 实测定性）：0.2.0-rc.2 宿主「面板保存」对第三方 bundle 插件
  * 只写 cordis.yml / cordis.patch.yml（文件持久化），**不把 entry config 回传给
  * apply 的 configRaw，也不建 settings 快照文件**——面板选的模型值永远进不了运行层
- * （任务 config 一直是插件全默认）。详见.md「配置-运行时脱节」条目。
+ * （任务 config 一直是插件全默认）。
  *
  * 本模块提供替代正道：
  *   - 配置文件 = `~/.dsh/dsh-code-review/plugin-config.json`（与任务簿同域，

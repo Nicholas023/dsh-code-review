@@ -33,7 +33,7 @@ export const SESSION_MODEL = 'session';
  */
 export function createSettingsSchema(models = []) {
   const modelOptions = [SESSION_MODEL, ...models.map((m) => m.value)];
-  // schemastery 的 enum 用 z.string().default() + UI select 约束（宿主范式同款）。
+  // schemastery 的 enum 用 z.string().default() + UI select 约束。
   const schema = z.object({
     review_model: z
       .string()

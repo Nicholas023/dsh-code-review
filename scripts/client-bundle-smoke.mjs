@@ -1,7 +1,7 @@
 /**
  * scripts/client-bundle-smoke.mjs —— 客户端模块（client.js）协议冒烟。
  *
- * 背景（2026-10-12 生产实装踩坑）：client.js 若没按宿主协议调用
+ * 背景（2026-10-12 客户端装载协议实测）：client.js 若没按宿主协议调用
  * `window.__ModuleLoader__.load({ id, factory })` 注册，宿主 Web 端加载时报
  * `loaded without registering "dsh-code-review" via __ModuleLoader__.load`，
  * 且整个插件激活失败（设置分区也不出现）。本脚本在 Node 里模拟宿主加载步骤：

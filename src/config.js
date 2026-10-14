@@ -1,7 +1,7 @@
 /**
  * config.js —— dsh-code-review 配置模型：默认值、归一化、宿主 volatile 解包。
  *
- * 设计要点（与 宿主既有插件范式 的 config.js 同范式）：
+ * 设计要点：
  *  - 键名统一 snake_case（YAML 无嵌套歧义，宿主设置命名空间扁平字段）；
  *  - 插件所有可调项在这里集中声明，settings-schema.js 的字段与之一一对应；
  *  - normalizeConfig 是唯一合法化入口：合并默认、校验范围、洗掉未知键，
@@ -39,7 +39,7 @@ export const DEFAULT_CONFIG = {
 };
 
 /**
- * 宿主传入的配置可能带 volatile 热更新包装对象（Vision 插件实测踩坑：
+ * 宿主传入的配置可能带 volatile 热更新包装对象（实测：
  * 直接把包装对象交给合法化会以「实际: [object Object]」导致启用失败）。
  * 这里把这类字段解包成原值再走 normalizeConfig。
  *

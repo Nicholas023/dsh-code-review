@@ -36,16 +36,16 @@ function ok(name, cond, detail = '') {
 ok('缺失文件读空', JSON.stringify(readFileConfig()) === '{}');
 
 // ② 白名单过滤 + 类型校验
-const written = writeFileConfig({ review_model: ' REVIEW_MODEL_A ', bad_key: 99, engine_bin: 123, report_dir: '~/r' });
+const written = writeFileConfig({ review_model: ' test-model-a ', bad_key: 99, engine_bin: 123, report_dir: '~/r' });
 ok('写入过滤未知键', !('bad_key' in written) && !('engine_bin' in written), JSON.stringify(written));
-ok('值 trim 后落盘', written.review_model === 'REVIEW_MODEL_A', JSON.stringify(written));
+ok('值 trim 后落盘', written.review_model === 'test-model-a', JSON.stringify(written));
 const onDisk = JSON.parse(readFileSync(PLUGIN_CONFIG_FILE, 'utf8'));
-ok('回读一致', onDisk.review_model === 'REVIEW_MODEL_A' && onDisk.report_dir === '~/r');
+ok('回读一致', onDisk.review_model === 'test-model-a' && onDisk.report_dir === '~/r');
 ok('原子写无 tmp 残留', !existsSync(`${PLUGIN_CONFIG_FILE}.tmp`));
 
 // ③ 读回：review_model 在，bad_key/engine_bin 不在
 const reread = readFileConfig();
-ok('读回含合法覆盖', reread.review_model === 'REVIEW_MODEL_A' && reread.report_dir === '~/r');
+ok('读回含合法覆盖', reread.review_model === 'test-model-a' && reread.report_dir === '~/r');
 ok('读回无非法字段', !('bad_key' in reread) && !('engine_bin' in reread));
 
 // ④ 显式清空字段（null）→ 占位保留、读取可见（normalize 层会回退默认）
@@ -71,13 +71,13 @@ const tool = createSetConfigTool({ logger: { warn: () => {} } }, () => ({ review
 const query = await tool.execute({}, {});
 ok('查询模式 ok', query.ok === true && query.text.includes('配置文件'));
 // 重新生成工具（getConfig stub 反映写后重读值）
-const tool2 = createSetConfigTool({ logger: { warn: () => {} } }, () => ({ review_model: 'REVIEW_MODEL_B', report_dir: '~/d', engine_bin: '' }), {
+const tool2 = createSetConfigTool({ logger: { warn: () => {} } }, () => ({ review_model: 'test-model-b', report_dir: '~/d', engine_bin: '' }), {
   writeFileConfig,
   PLUGIN_CONFIG_FILE,
 });
-const writeRes = await tool2.execute({ review_model: 'REVIEW_MODEL_B' }, {});
-ok('写入模式返回生效值', writeRes.text.includes('REVIEW_MODEL_B'));
-ok('写入后文件存在', readFileConfig().review_model === 'REVIEW_MODEL_B');
+const writeRes = await tool2.execute({ review_model: 'test-model-b' }, {});
+ok('写入模式返回生效值', writeRes.text.includes('test-model-b'));
+ok('写入后文件存在', readFileConfig().review_model === 'test-model-b');
 
 console.log(`\nfile-config smoke 全过：${passed} 项。`);
 rmSync(tmpRoot, { recursive: true, force: true });

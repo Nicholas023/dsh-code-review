@@ -33,7 +33,7 @@ try {
   const id = tb.enqueueTask({ repoPath: '/r', command: 'scan', requestor: { sessionId: 'sess-1' } });
   const t0 = tb.readTask(id);
   check('requestor 随任务落盘', t0.requestor?.sessionId === 'sess-1', JSON.stringify(t0.requestor));
-  tb.updateTask(id, { status: 'done', result: { ok: true, elapsedSec: 7, modelNote: 'REVIEW_MODEL', reportPath: '/rep.md', text: '## 评审完成\n\n内容……' } });
+  tb.updateTask(id, { status: 'done', result: { ok: true, elapsedSec: 7, modelNote: 'TEST-MODEL', reportPath: '/rep.md', text: '## 评审完成\n\n内容……' } });
 
   /* ── 2. 通道探测择优 ── */
   const callLog = [];

@@ -7,7 +7,7 @@
  *  3. 注册宿主设置命名空间（评审模型选择器 / 报告目录 / 引擎路径 / 首启引导）；
  *  4. 首启引导流程（首次启用时输出确认引导，见 config.first_run）。
  *
- * 设置读法（与 宿主既有插件范式 同范式）：
+ * 设置读法：
  *  - 宿主 settings 服务（inject 声明 'settings'）注册命名空间，DSH 设置页渲染；
  *  - 工具执行时经 getRuntimeConfig() 惰性读取最新设置快照，改设置即热生效；
  *  - 参数优先级：工具参数(显式) > 设置页 > 默认值。
@@ -37,8 +37,7 @@ export const name = 'dsh-code-review';
 
 /**
  * Cordis 服务注入声明：缺 'tools' 宿主报「cannot get property tools without
- * inject」（插件启用失败）；'settings' 为 DSH 宿主设置服务（宿主既有插件范式
- * 生产实证存在）。两者都确定存在，声明即生效。
+ * inject」（插件启用失败）；'settings' 为 DSH 宿主设置服务。两者都确定存在，声明即生效。
  */
 export const inject = ['tools', 'settings'];
 
@@ -418,9 +417,9 @@ function registerSettings(ctx) {
 /**
  * 注册斜杠命令 /review（手动精确传参入口，与 code_review 工具共用执行体）。
  *
- * ⚠ 生命周期纪律（2026-10-12 生产实装踩坑）：Cordis 在 apply 阶段**未注入的
+ * ⚠ 生命周期纪律（2026-10-12 客户端装载协议实测）：Cordis 在 apply 阶段**未注入的
  * 服务属性直接访问即抛** `cannot get property 'command' without inject`
- * （typeof 检查也拦不住——读属性本身就炸）。正确姿势与 宿主既有插件范式 一致：
+ * （typeof 检查也拦不住——读属性本身就炸）。正确姿势：
  * 可选服务用 `ctx.inject(['command'], cb)` 动态注入，宿主提供 command 服务时
  * 才注册；不写静态 `inject` 数组（那是「必需的才用」），缺服务不阻塞插件激活，
  * 工具 code_review 仍为主力入口。
@@ -527,13 +526,13 @@ function mountTaskApi(ctx, disposers) {
 export function apply(ctx, configRaw) {
   // 运行时配置真源 = 三层合并（低 → 高）：
   //   ① 宿主 entry（configRaw，0.2.0 configForms 通道，volatile 字段为可热更新
-  //      包装对象，须**每次读取时重新解包**——照宿主范式「调用方每次读取配置都经
-  //      pickOverrides」范式，不能只在启动时解包一次）；
+  //      包装对象，须**每次读取时重新解包**（调用方每次读取配置都经
+  //      pickOverrides 解包，不能只在启动时解包一次）；
   //   ② settings 命名空间快照（0.1.x 通道保底，尽力读取）；
   //   ③ 插件自有配置文件 plugin-config.json（**运行真源**，2026-10-13 加）：
   //      0.2.0-rc.2 宿主「面板保存」对第三方 bundle 插件不回传 entry config（实测
-  //      只写 cordis.yml/patch.yml、无 settings 快照、apply 收全默认——见
-  //      「配置-运行时脱节」），故由 code_review_set_config 工具/人工编辑写入本文件，
+  //      只写 cordis.yml/patch.yml、无 settings 快照、apply 收全默认），
+  //      code_review_set_config 工具/人工编辑写入本文件，
   //      getConfig 每次调用都重新读（热生效，无需重启），优先级最高。
   const entryConfig = () => normalizeConfig({ ...pickOverrides(configRaw), ...readFileConfig() });
   // 兜底 sourceGetter：settings 服务未就绪时仅 entry + 文件层（含默认值兜底）。

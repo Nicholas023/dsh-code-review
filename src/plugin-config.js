@@ -3,11 +3,10 @@
  *
  * DSH 0.2.0 起设置页展示「profile 条目中可编辑字段」的投影：客户端用
  * `ctx.configForms.get(<包名>)` 读写插件配置（旧 settingsScope API 已换代，
- * 见第 11 条）。宿主 describe 行的 `schema` 来自插件导出的 `Config`
+ * 宿主 describe 行的 `schema` 来自插件导出的 `Config`
  * （`entry.fiber.runtime.Config`），据此投影出可编辑表单；用户保存后写入
  * profile 的 Cordis patch 并回传到 `apply(ctx, config)`。
  *
- * 与 宿主既有插件范式 的 plugin-config.js 同范式：
  *  - 每个字段标 `.volatile()`（可在 Web 端热改，保存即回传 apply）；
  *  - **不设默认值**（关键）：未填写时解析为 undefined，运行时经
  *    config.js 的 normalizeConfig 兜底内置默认——设置页是「覆盖层」，

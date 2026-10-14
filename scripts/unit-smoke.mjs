@@ -142,7 +142,7 @@ t('createSettingsSchema() 默认 schema 可构造', () => {
   assert.ok(String(schema.toString()).length > 0);
 });
 t('createSettingsSchema(带模型列表) 接收选项（步骤5 动态选项位）', () => {
-  const schema = createSettingsSchema([{ value: 'review-model-x', label: 'review-model-x' }]);
+  const schema = createSettingsSchema([{ value: 'test-model-x', label: 'test-model-x' }]);
   assert.ok(schema && (typeof schema === 'function' || typeof schema === 'object'));
 });
 
@@ -174,9 +174,9 @@ t('createModelSource()：listCandidates 首项为 session', () => {
 
 /* ---------- 8. credentials（步骤5，纯函数样例） ---------- */
 t('parseCredentialsText：refs 段与顶层键均可提取', () => {
-  const text = 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc123\n  PARTNER_API_KEY: sk-other\n';
+  const text = 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc123\n  THIRD_API_KEY: sk-other\n';
   assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'sk-abc123');
-  assert.equal(parseCredentialsText(text, 'PARTNER_API_KEY'), 'sk-other');
+  assert.equal(parseCredentialsText(text, 'THIRD_API_KEY'), 'sk-other');
 });
 t('parseCredentialsText：深缩进（records 段）不误读', () => {
   const text = 'records:\n  client-connection/session\n    payload:\n      secret: inner-1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n';

@@ -43,7 +43,7 @@ function readCredentialsYaml(name) {
  * 解析指定引用名（apiKeyEnv）的真实 key。
  *
  * @param {object} [ctx] DSH 会话上下文（有则尝试 ctx.credentials seam）。
- * @param {string} envName 引用名，如 'DEEPSEEK_API_KEY' / 'PARTNER_API_KEY'。
+ * @param {string} envName 引用名，如 'DEEPSEEK_API_KEY'。
  * @param {object} [io] 测试注入位：{ env }。
  * @returns {Promise<string>} key（空串 = 未找到，调用方决定降级行为）。
  */

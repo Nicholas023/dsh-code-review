@@ -21,7 +21,7 @@ import { resolveApiKey, isKeyMissing } from '../src/credentials.js';
 import { prepareEngineEnv, runEngine } from '../src/runner.js';
 
 // 默认验证目标：本机 DSH 配置中存在的非会话模型（可按需以命令行参数覆盖）。
-const TARGET = process.argv[2] ?? 'REVIEW_MODEL_A';
+const TARGET = process.argv[2] ?? 'session';
 const BIN = fileURLToPath(new URL('../bin/codecheck.exe', import.meta.url));
 let failures = 0;
 const check = (label, ok, detail = '') => {
