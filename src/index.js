@@ -312,7 +312,7 @@ function statusPayload(taskId) {
     if (!task) {
       return { text: `未找到任务 ${taskId}（任务簿：${TASKS_ROOT}）。可用 code_review_status 不带 task_id 列出最近任务。` };
     }
-    const lines = [
+    let lines = [
       `## 评审任务 ${task.id}`,
       '',
       `- 状态: **${task.status}**${task.status === 'done' ? ' ✅' : task.status === 'failed' ? ' ❌' : ''}`,
