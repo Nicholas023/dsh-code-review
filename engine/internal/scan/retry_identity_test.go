@@ -117,7 +117,7 @@ func TestScanRequestsCarryNoIdentity(t *testing.T) {
 		client := &identityProbeClient{reply: `{"groups":[{"members":["c-0","c-1"],"merged_content":"combined"},{"members":["c-2"]}]}`}
 		a := newProbeAgent(t, tpl, client, collector)
 
-		a.maybeRunDedup(context.Background(), 0, 0)
+		a.maybeRunDedup(context.Background(), 0, allCollectorPaths(collector))
 		client.assertClean(t, 1)
 	})
 

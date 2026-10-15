@@ -51,6 +51,18 @@ func (e *errorScanClient) CompletionsWithCtx(_ context.Context, _ llm.ChatReques
 	return nil, e.err
 }
 
+// allCollectorPaths returns the path set of every comment currently in the
+// collector. Tests that treat the whole collector as one batch pass this as
+// the batchPaths argument (the batch-isolation replacement for the old
+// `batchStart = 0` snapshot argument).
+func allCollectorPaths(c *tool.CommentCollector) map[string]struct{} {
+	paths := make(map[string]struct{})
+	for _, cm := range c.Comments() {
+		paths[cm.Path] = struct{}{}
+	}
+	return paths
+}
+
 func TestAgent_Getters(t *testing.T) {
 	tpl := makeTemplateWithFullScan()
 	a := newAgentForTest(t, tpl)
@@ -461,8 +473,7 @@ func TestMaybeRunDedup_Success(t *testing.T) {
 		}),
 	})
 
-	batchStart := 0
-	a.maybeRunDedup(context.Background(), 0, batchStart)
+	a.maybeRunDedup(context.Background(), 0, allCollectorPaths(collector))
 
 	comments := collector.Comments()
 	if len(comments) != 2 {
@@ -484,7 +495,7 @@ func TestMaybeRunDedup_SkipWhenDisabled(t *testing.T) {
 
 	a := newAgentForTest(t, makeTemplateWithFullScan())
 	a.args.CommentCollector = collector
-	a.maybeRunDedup(context.Background(), 0, 0)
+	a.maybeRunDedup(context.Background(), 0, allCollectorPaths(collector))
 
 	if len(collector.Comments()) != 3 {
 		t.Errorf("comments should be unchanged when dedup is disabled")
@@ -512,7 +523,7 @@ func TestMaybeRunDedup_SkipWhenTooFewComments(t *testing.T) {
 		}),
 	})
 
-	a.maybeRunDedup(context.Background(), 0, 0)
+	a.maybeRunDedup(context.Background(), 0, allCollectorPaths(collector))
 	if len(collector.Comments()) != 1 {
 		t.Error("comments should be unchanged when below min threshold")
 	}

@@ -543,10 +543,22 @@ func extFromPath(path string) string {
 }
 
 // dispatchSubtasks groups items into batches per the configured strategy,
-// then processes batches sequentially while running files within each
-// batch concurrently up to MaxConcurrency. Sequential batches enable
-// future per-batch hooks (e.g. Phase 6 dedup) and improve LLM prompt-cache
-// hit rate by keeping same-language files adjacent in time.
+// then runs a two-stage pipeline over them:
+//
+// Stage A schedules every file from every batch into ONE shared concurrency
+// pool (MaxConcurrency). A new file starts its LLM request as soon as a slot
+// frees up, regardless of which batch it belongs to — batch N no longer has
+// to fully finish (execution + dedup + checkpoint persist) before batch N+1
+// files are permitted to run. This makes `--concurrency N` take effect
+// across batch boundaries instead of inside a single batch.
+//
+// Stage B then settles each batch, in batch order: it waits for that batch's
+// file goroutines, drains only that batch's async comment post-processing
+// via AwaitKey (never the pool-wide Await, which would race later batches'
+// in-flight SubmitFor), isolates the batch's comments by file path, and only
+// then runs dedup + checkpoint persist. Batch boundaries are thus preserved
+// for dedup and review_item_done ordering, while file execution overlaps
+// freely across batches.
 func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error) {
 	startTime := time.Now()
 	defer func() {
@@ -565,49 +577,187 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 	batches := groupBatches(a.items, strategy, a.args.Template.BatchSize)
 	fmt.Fprintf(stdout.Writer(), "[codecheck] scan dispatch: %d batch(es) by %s strategy\n", len(batches), strategy)
 
+	// ---- Stage A: cross-batch dispatch ------------------------------------
+	// All batches share one semaphore so file execution overlaps across batch
+	// boundaries (the actual throughput win). Batch membership is preserved
+	// per file in states[bi] for the settle phase below.
+	concurrency := a.args.MaxConcurrency
+	if concurrency <= 0 {
+		concurrency = 8
+	}
+	sem := make(chan struct{}, concurrency)
+	timeout := time.Duration(a.args.ConcurrentTaskTimeout) * time.Minute
+
+	// batchState accumulates everything stage B needs for one batch: the
+	// file goroutines' WaitGroup, the checkpoints in completion order, the
+	// full set of file paths (used to isolate this batch's comments from
+	// comments that later batches may already have added), and the task
+	// keys (== file paths) whose async comment post-processing the batch
+	// must drain with AwaitKey.
+	type batchState struct {
+		wg          sync.WaitGroup
+		mu          sync.Mutex
+		checkpoints []batchCheckpoint
+		paths       []string
+		keys        []string
+	}
+	states := make([]*batchState, len(batches))
+	for bi := range batches {
+		states[bi] = &batchState{}
+	}
+
 	var dispatched int64
+	var dispatchErr error
+dispatchLoop:
 	for bi, batch := range batches {
-		if err := ctx.Err(); err != nil {
-			return a.args.CommentCollector.Comments(), err
-		}
-		// Snapshot the collector so we can isolate comments added by *this*
-		// batch and feed them into the per-batch dedup hook.
-		batchStart := a.args.CommentCollector.Snapshot()
+		st := states[bi]
+		for i := range batch {
+			if err := ctx.Err(); err != nil {
+				// Cancelled: stop scheduling new files; stage B still
+				// persists whatever already completed.
+				dispatchErr = err
+				break dispatchLoop
+			}
+			it := batch[i]
+			fingerprint := a.scanItemFingerprint(it)
+			st.paths = append(st.paths, it.Path)
 
-		n, budgetHit, checkpoints, err := a.dispatchBatch(ctx, bi, batch)
-		dispatched += n
-		if err != nil {
-			// ctx cancelled mid-batch: stop scheduling further batches but
-			// still return whatever we've collected so far.
-			// Persist completed items so the next resume does not scan them again.
-			a.recordBatchCheckpoints(checkpoints, batchStart, nil)
-			return a.args.CommentCollector.Comments(), err
-		}
+			// Resume: reuse the stored comments synchronously. No LLM call,
+			// no concurrency slot, and no budget consumption, so resume never
+			// blocks or gates later files.
+			if item, ok := a.resumeItem(fingerprint); ok {
+				for _, cm := range item.Comments {
+					a.args.CommentCollector.Add(cm)
+				}
+				st.mu.Lock()
+				st.checkpoints = append(st.checkpoints, batchCheckpoint{
+					item:             it,
+					reused:           true,
+					originalComments: item.Comments,
+				})
+				st.mu.Unlock()
+				continue
+			}
 
-		// Drain async comment workers BEFORE dedup so all of this batch's
-		// comments are visible. recordBatchCheckpoints has its own Await for
-		// checkpoint correctness; this one keeps the dedup input complete.
-		// CommentWorkerPool.Await is cumulative across batches - that is fine
-		// since batches are sequential here.
+			// Acquire a shared slot (across batches), or stop scheduling on
+			// cancellation.
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				dispatchErr = ctx.Err()
+				break dispatchLoop
+			}
+
+			// Per-file budget look-ahead, AFTER the slot: the previous file's
+			// goroutine had to release its slot (which happens only after its
+			// usage was recorded), so the used counter is fresh here.
+			// Evaluating before the acquire — the pre-pipeline spot — sees a
+			// stale count under a multi-file batch: the next file is checked
+			// while the batch's own previous goroutine is still in flight,
+			// so the gate under-schedules by exactly one file, that file then
+			// gets stopped by the run loop's own token guard, and the stop
+			// looks like a per-file failure instead of a budget cut. With the
+			// check moved here the gate trips before the overflow file is
+			// ever queued and the run stays a clean "warnings" outcome.
+			if a.args.MaxTokensBudget > 0 {
+				used := a.runner.TotalTokensUsed()
+				projected := used + estimateFileTokens(it, a.planEnabled())
+				if projected > a.args.MaxTokensBudget {
+					fmt.Fprintf(stdout.Writer(), "[codecheck] token budget reached (used %s + next-file est ≈ %s > budget %s) — skipping %s and remaining files\n",
+						humanTokens(used), humanTokens(projected), humanTokens(a.args.MaxTokensBudget), it.Path)
+					a.recordWarning("token_budget_reached", it.Path,
+						fmt.Sprintf("stopped in batch #%d: used %d tokens + next-file estimate exceeds budget %d", bi, used, a.args.MaxTokensBudget))
+					// budgetExceeded is the run-level signal emitRunResult
+					// reads after Run returns.
+					a.budgetExceeded = true
+					<-sem // return the slot we just took
+					break dispatchLoop
+				}
+			}
+
+			dispatched++
+			st.wg.Add(1)
+			// Register the key before the goroutine launches: the loop calls
+			// SubmitFor under this same key (it.Path), and stage B must be
+			// able to AwaitKey it after the lot finishes.
+			st.keys = append(st.keys, it.Path)
+			go func(st *batchState, it model.ScanItem, fingerprint string, bi int) {
+				defer st.wg.Done()
+				defer func() { <-sem }()
+
+				var fileCtx context.Context
+				var cancel context.CancelFunc
+				if timeout > 0 {
+					fileCtx, cancel = context.WithTimeout(ctx, timeout)
+					defer cancel()
+				} else {
+					fileCtx = ctx
+				}
+
+				completedOK, skipReason, err := a.executeSubtask(fileCtx, it)
+				if err != nil {
+					atomic.AddInt64(&a.subtaskFailed, 1)
+					a.session.RecordReviewItemFailed(it.Path, it.Path, it.Path, fingerprint, err.Error())
+					fmt.Fprintf(stdout.Writer(), "[codecheck] Scan subtask error for %s (batch #%d): %v\n", it.Path, bi, err)
+					telemetry.ErrorEvent(fileCtx, "scan.subtask.error", err,
+						telemetry.AnyToAttr("file.path", it.Path),
+						telemetry.AnyToAttr("batch.index", bi))
+					a.recordWarning("scan_subtask_error", it.Path, err.Error())
+					return
+				}
+				if !completedOK {
+					if skipReason != "" {
+						atomic.AddInt64(&a.subtaskFailed, 1)
+						a.session.RecordReviewItemFailed(it.Path, it.Path, it.Path, fingerprint, skipReason)
+						a.recordWarning("scan_subtask_error", it.Path, skipReason)
+					}
+					return
+				}
+				st.mu.Lock()
+				st.checkpoints = append(st.checkpoints, batchCheckpoint{item: it})
+				st.mu.Unlock()
+			}(st, it, fingerprint, bi)
+		}
+	}
+
+	// ---- Stage B: per-batch settle, in batch order ------------------------
+	// A batch's file goroutines must all finish first so every SubmitFor
+	// under its keys is registered (the loop's async comment workers hand
+	// the resolved comments to the collector). Then drain ONLY those keys
+	// with AwaitKey — never the pool-wide Await, because files of later
+	// batches may still be submitting new keys while we settle an earlier
+	// one. Only after both waits are the batch's comments complete, which is
+	// what dedup and checkpoint persist read. Empty batches (nothing was
+	// scheduled, e.g. after a cancel) settle to no-ops.
+	for bi, st := range states {
+		st.wg.Wait()
 		if a.args.CommentWorkerPool != nil {
-			a.args.CommentWorkerPool.Await()
+			for _, key := range st.keys {
+				a.args.CommentWorkerPool.AwaitKey(key)
+			}
 		}
-
-		dedupCheckpoints := a.maybeRunDedup(ctx, bi, batchStart)
-		a.recordBatchCheckpoints(checkpoints, batchStart, dedupCheckpoints)
-
-		// The per-file budget gate inside dispatchBatch tripped — stop
-		// scheduling any remaining batches.
-		if budgetHit {
-			break
+		// Batch isolation by path set: later batches' comments may already be
+		// in the collector, so a collector snapshot counter (the previous
+		// batchStart approach) would wrongly merge or miss comments.
+		batchPaths := make(map[string]struct{}, len(st.paths))
+		for _, p := range st.paths {
+			batchPaths[p] = struct{}{}
 		}
+		// On cancellation the per-file workers stop early; skip dedup so we
+		// don't fire a doomed LLM call (matching the old per-batch behavior),
+		// but still persist whatever completed.
+		var dedupCheckpoints map[string][]model.LlmComment
+		if ctx.Err() == nil {
+			dedupCheckpoints = a.maybeRunDedup(ctx, bi, batchPaths)
+		}
+		a.recordBatchCheckpoints(st.checkpoints, batchPaths, dedupCheckpoints)
 	}
 
 	failed := atomic.LoadInt64(&a.subtaskFailed)
-	if failed > 0 && failed == dispatched {
+	if failed > 0 && failed == dispatched && dispatchErr == nil {
 		return nil, fmt.Errorf("all %d file scan(s) failed — check your LLM configuration and API key", dispatched)
 	}
-	return a.args.CommentCollector.Comments(), nil
+	return a.args.CommentCollector.Comments(), dispatchErr
 }
 
 type batchCheckpoint struct {
@@ -622,16 +772,17 @@ type batchCheckpoint struct {
 // one file cannot erase another file's finding on resume.
 func (a *Agent) recordBatchCheckpoints(
 	checkpoints []batchCheckpoint,
-	batchStart int,
+	batchPaths map[string]struct{},
 	dedupCheckpoints map[string][]model.LlmComment,
 ) {
 	if len(checkpoints) == 0 {
 		return
 	}
-	if a.args.CommentWorkerPool != nil {
-		a.args.CommentWorkerPool.Await()
-	}
-	finalCommentsByPath := groupCommentsByPath(a.args.CommentCollector.Since(batchStart))
+	// No pool-wide Await here: the caller (stage B of dispatchSubtasks) has
+	// already drained this batch's async comment workers via per-key
+	// AwaitKey. A pool-wide Await would race later batches whose SubmitFor
+	// calls are still in flight (sync.WaitGroup misuse panic).
+	finalCommentsByPath := groupCommentsByPath(a.commentsInBatch(batchPaths))
 	for _, checkpoint := range checkpoints {
 		fingerprint := a.scanItemFingerprint(checkpoint.item)
 		comments := finalCommentsByPath[checkpoint.item.Path]
@@ -660,124 +811,28 @@ func groupCommentsByPath(comments []model.LlmComment) map[string][]model.LlmComm
 	return byPath
 }
 
+// commentsInBatch returns the collector comments that belong to one batch,
+// isolated by the batch's file path set. The pre-pipeline approach used a
+// collector snapshot counter (Since(batchStart)) to delimit a batch, but
+// with cross-batch dispatch the next batch's files can already be running —
+// and their async comment workers may add comments before this batch is
+// settled. A path-set filter is the only batch boundary that stays correct
+// under overlap.
+func (a *Agent) commentsInBatch(batchPaths map[string]struct{}) []model.LlmComment {
+	all := a.args.CommentCollector.Comments()
+	batchComments := make([]model.LlmComment, 0, len(all))
+	for _, c := range all {
+		if _, ok := batchPaths[c.Path]; ok {
+			batchComments = append(batchComments, c)
+		}
+	}
+	return batchComments
+}
+
 // resolveBatchStrategy reads the strategy from the scan template, defaulting
 // to BatchNone for unrecognized / empty values.
 func (a *Agent) resolveBatchStrategy() BatchStrategy {
 	return parseBatchStrategy(a.args.Template.BatchStrategy)
-}
-
-// dispatchBatch fans out the files of a single batch concurrently and
-// blocks until they all finish (or ctx is cancelled). Returns the number
-// of files dispatched, whether the token budget was hit mid-batch, the
-// completed/reused files whose checkpoints need recording, and ctx.Err()
-// if cancelled.
-//
-// The budget gate is checked per file, right after acquiring the
-// concurrency slot and before launching the subtask: if the tokens already
-// spent PLUS a look-ahead estimate of this file's cost would exceed the
-// budget, the file (and all remaining files in the batch) are skipped.
-// This keeps overrun bounded by roughly one in-flight file per worker,
-// instead of a whole batch as the coarse batch-level gate did.
-func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.ScanItem) (int64, bool, []batchCheckpoint, error) {
-	concurrency := a.args.MaxConcurrency
-	if concurrency <= 0 {
-		concurrency = 8
-	}
-	sem := make(chan struct{}, concurrency)
-	timeout := time.Duration(a.args.ConcurrentTaskTimeout) * time.Minute
-
-	var (
-		wg            sync.WaitGroup
-		dispatched    int64
-		budgetHit     bool
-		checkpointsMu sync.Mutex
-		checkpoints   []batchCheckpoint
-	)
-
-	for i := range batch {
-		it := batch[i]
-		fingerprint := a.scanItemFingerprint(it)
-		if item, ok := a.resumeItem(fingerprint); ok {
-			for _, cm := range item.Comments {
-				a.args.CommentCollector.Add(cm)
-			}
-			checkpointsMu.Lock()
-			checkpoints = append(checkpoints, batchCheckpoint{
-				item:             it,
-				reused:           true,
-				originalComments: item.Comments,
-			})
-			checkpointsMu.Unlock()
-			continue
-		}
-
-		// Per-file budget look-ahead. Stop before acquiring a slot so we
-		// don't even queue work that would blow the budget.
-		if a.args.MaxTokensBudget > 0 {
-			used := a.runner.TotalTokensUsed()
-			projected := used + estimateFileTokens(it, a.planEnabled())
-			if projected > a.args.MaxTokensBudget {
-				fmt.Fprintf(stdout.Writer(), "[codecheck] token budget reached (used %s + next-file est ≈ %s > budget %s) — skipping %s and remaining files\n",
-					humanTokens(used), humanTokens(projected), humanTokens(a.args.MaxTokensBudget), it.Path)
-				a.recordWarning("token_budget_reached", it.Path,
-					fmt.Sprintf("stopped in batch #%d: used %d tokens + next-file estimate exceeds budget %d", batchIdx, used, a.args.MaxTokensBudget))
-				budgetHit = true
-				// budgetHit is per-batch and dies with this call; the field is
-				// the run-level signal emitRunResult reads after Run returns.
-				a.budgetExceeded = true
-				break
-			}
-		}
-
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			wg.Wait()
-			return dispatched, budgetHit, checkpoints, ctx.Err()
-		}
-
-		dispatched++
-		wg.Add(1)
-		go func(it model.ScanItem, fingerprint string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			var fileCtx context.Context
-			var cancel context.CancelFunc
-			if timeout > 0 {
-				fileCtx, cancel = context.WithTimeout(ctx, timeout)
-				defer cancel()
-			} else {
-				fileCtx = ctx
-			}
-
-			completedOK, skipReason, err := a.executeSubtask(fileCtx, it)
-			if err != nil {
-				atomic.AddInt64(&a.subtaskFailed, 1)
-				a.session.RecordReviewItemFailed(it.Path, it.Path, it.Path, fingerprint, err.Error())
-				fmt.Fprintf(stdout.Writer(), "[codecheck] Scan subtask error for %s (batch #%d): %v\n", it.Path, batchIdx, err)
-				telemetry.ErrorEvent(fileCtx, "scan.subtask.error", err,
-					telemetry.AnyToAttr("file.path", it.Path),
-					telemetry.AnyToAttr("batch.index", batchIdx))
-				a.recordWarning("scan_subtask_error", it.Path, err.Error())
-				return
-			}
-			if !completedOK {
-				if skipReason != "" {
-					atomic.AddInt64(&a.subtaskFailed, 1)
-					a.session.RecordReviewItemFailed(it.Path, it.Path, it.Path, fingerprint, skipReason)
-					a.recordWarning("scan_subtask_error", it.Path, skipReason)
-				}
-				return
-			}
-			checkpointsMu.Lock()
-			checkpoints = append(checkpoints, batchCheckpoint{item: it})
-			checkpointsMu.Unlock()
-		}(it, fingerprint)
-	}
-
-	wg.Wait()
-	return dispatched, budgetHit, checkpoints, nil
 }
 
 // executeSubtask runs the scan pipeline for one file:
@@ -973,7 +1028,7 @@ func buildSummaryCommentsList(comments []model.LlmComment) string {
 // is a best-effort optimization, never a correctness gate. The returned map
 // contains safe per-file checkpoints: canonical comments for same-file groups
 // and original comments for cross-file groups.
-func (a *Agent) maybeRunDedup(ctx context.Context, batchIdx, batchStart int) map[string][]model.LlmComment {
+func (a *Agent) maybeRunDedup(ctx context.Context, batchIdx int, batchPaths map[string]struct{}) map[string][]model.LlmComment {
 	if !a.dedupEnabled() {
 		return nil
 	}
@@ -983,7 +1038,7 @@ func (a *Agent) maybeRunDedup(ctx context.Context, batchIdx, batchStart int) map
 		minN = 2
 	}
 
-	batchComments := a.args.CommentCollector.Since(batchStart)
+	batchComments := a.commentsInBatch(batchPaths)
 	if len(batchComments) < minN {
 		return nil
 	}
@@ -1026,7 +1081,7 @@ func (a *Agent) maybeRunDedup(ctx context.Context, batchIdx, batchStart int) map
 		// No-op result — don't bother rewriting the collector.
 		return nil
 	}
-	a.args.CommentCollector.ReplaceSince(batchStart, deduped)
+	a.args.CommentCollector.ReplaceByPaths(batchPaths, deduped)
 	fmt.Fprintf(stdout.Writer(), "[codecheck] scan dedup batch #%d: %d → %d comments\n", batchIdx, len(batchComments), len(deduped))
 	return dedupCheckpoints
 }

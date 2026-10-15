@@ -79,6 +79,10 @@ func (c *CommentCollector) Since(start int) []model.LlmComment {
 // Useful for batch-level dedup: take a Snapshot, run a batch, dedup the
 // new comments, then apply the deduped list back. Indices ≥ len(comments)
 // are ignored (no-op).
+//
+// Snapshot windows are only sound when batches run serially. Cross-batch
+// dispatch lets a later batch append comments before an earlier batch is
+// settled, so scan uses ReplaceByPaths instead.
 func (c *CommentCollector) ReplaceSince(start int, replacements []model.LlmComment) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -89,6 +93,25 @@ func (c *CommentCollector) ReplaceSince(start int, replacements []model.LlmComme
 		return
 	}
 	c.comments = append(c.comments[:start:start], replacements...)
+}
+
+// ReplaceByPaths removes every comment whose Path is in paths and appends
+// the replacements at the end (kept comments keep their relative order).
+// This is the path-keyed sibling of ReplaceSince: scan batch dedup uses it
+// because the batch's comments can no longer be delimited by a snapshot
+// index once later batches may have already appended their own comments.
+func (c *CommentCollector) ReplaceByPaths(paths map[string]struct{}, replacements []model.LlmComment) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	kept := make([]model.LlmComment, 0, len(c.comments)+len(replacements))
+	for _, cm := range c.comments {
+		if _, ok := paths[cm.Path]; ok {
+			continue
+		}
+		kept = append(kept, cm)
+	}
+	kept = append(kept, replacements...)
+	c.comments = kept
 }
 
 // RemoveByPathAndIndices removes comments for a given path whose per-path index
