@@ -72,6 +72,11 @@ function taskFromArgs(args, cfg) {
       report_dir: cfg.report_dir,
       engine_bin: cfg.engine_bin,
       review_timeout_ms: cfg.review_timeout_ms,
+      // 并发设置必须随任务卡快照一起携带（2026-10-15 修）：review-exec 用
+      // `{ ...DEFAULT_CONFIG, ...task.config }` 还原执行配置，快照漏带即回落默认
+      // false（单线）——表现为设置面板已开启并发，引擎却仍收到 --concurrency 1。
+      concurrency_enabled: cfg.concurrency_enabled === true,
+      concurrency: cfg.concurrency,
     },
   };
 }

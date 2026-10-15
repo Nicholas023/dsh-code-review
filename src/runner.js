@@ -139,9 +139,13 @@ export function buildReviewArgs(opts) {
     // uncommitted（默认）：不加 diff 定位参数（引擎默认审查工作区未提交改动）。
   }
   if (Array.isArray(opts.excludePaths)) {
-    for (const p of opts.excludePaths) {
-      if (typeof p === 'string' && p.trim()) args.push('--exclude', p.trim());
-    }
+    // 引擎 --exclude 是**单值、逗号分隔多模式**语义（形如 `--exclude 'a/**,b/**'`），
+    // 不是可重复 flag：逐个 push 只有**最后一个**生效（2026-10-15 实测：5 个独立
+    // --exclude 得 `Will review (227)`（等于未排除），合并成逗号分隔才得 36）。
+    const patterns = opts.excludePaths
+      .filter((p) => typeof p === 'string' && p.trim())
+      .map((p) => p.trim());
+    if (patterns.length > 0) args.push('--exclude', patterns.join(','));
   }
   if (opts.focus) args.push('--background', opts.focus);
   // 并发（2026-10-14 迭代）：设置面板控制，成本控制权在用户。

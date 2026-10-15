@@ -24,14 +24,33 @@ const { createModelSource, SESSION_MODEL, DEEPSEEK_OFFICIAL_DEFAULT } = await im
 const { parseCredentialsText } = await import(new URL('../src/credentials.js', import.meta.url).href);
 
 let n = 0;
+/**
+ * 用例注册表。
+ *
+ * ⚠ 2026-10-15 修：此处原先写成 `function t(label, fn) { try { fn(); ... } }`——
+ * 对 **async 用例**（task-book / review-exec 两例）而言，`fn()` 返回的 Promise 既没被
+ * await 也没被 catch，于是：① `✔` 与计数在用例真正跑完**之前**就打印了（"40 项通过"
+ * 是虚的）；② 异步体内的异常变成 unhandledRejection 直接崩进程（实测在 task-book
+ * 用例的 readdirSync 处抛 ENOENT，且报错堆栈与 console.log 的输出顺序完全对不上）。
+ * 改为**先注册、末尾串行 await**：计数真实、异常被收敛、用例之间顺序确定（隔离 env 的
+ * 用例不再与后续用例交错）。
+ */
+const CASES = [];
 function t(label, fn) {
-  try {
-    fn();
-    console.log(`✔ ${label}`);
-    n += 1;
-  } catch (error) {
-    console.log(`✘ ${label} —— ${error.message}`);
-    process.exitCode = 1;
+  CASES.push({ label, fn });
+}
+
+/** 串行跑完全部用例（顺序执行，避免隔离 env 的用例互相交错）。 */
+async function runAll() {
+  for (const { label, fn } of CASES) {
+    try {
+      await fn();
+      console.log(`✔ ${label}`);
+      n += 1;
+    } catch (error) {
+      console.log(`✘ ${label} —— ${error.message}`);
+      process.exitCode = 1;
+    }
   }
 }
 
@@ -285,15 +304,19 @@ t('collectPendingPaths：空路径/非 git 目录 → []（点名层静默跳过
 });
 
 /* ---------- 7. 后台任务化（2026-10-13）新增 ---------- */
-t('buildReviewArgs：excludePaths → 每个 --exclude <p>（scan 全仓库时排除引擎目录）', () => {
+t('buildReviewArgs：excludePaths → 单个 --exclude 逗号分隔（引擎 --exclude 是单值多模式，重复传只有最后一个生效）', () => {
   const args = buildReviewArgs({ command: 'scan', repoPath: '/repo', excludePaths: ['engine/**', 'dist/**'] });
-  assert.ok(args.includes('--exclude'));
+  // 只允许出现一个 --exclude：引擎侧 --exclude 是单值、逗号分隔多模式语义，不是可重复
+  // flag；逐个 push 会让只有最后一个生效（2026-10-15 实测：5 个独立 --exclude → 待审 227
+  // 个文件，合并成逗号分隔 → 待审 36 个）。
+  assert.equal(args.filter((a) => a === '--exclude').length, 1);
   const i = args.indexOf('--exclude');
-  assert.equal(args[i + 1], 'engine/**');
-  assert.equal(args[i + 3], 'dist/**');
-  // 不传 excludePaths 时无 --exclude 尾巴（默认行为不回归）。
+  assert.equal(args[i + 1], 'engine/**,dist/**');
+  // 空串/非字符串项被丢弃；全部为空时不加 --exclude（默认行为不回归）。
   const plain = buildReviewArgs({ command: 'scan', repoPath: '/repo' });
   assert.ok(!plain.includes('--exclude'));
+  const blank = buildReviewArgs({ command: 'scan', repoPath: '/repo', excludePaths: ['', '   ', null] });
+  assert.ok(!blank.includes('--exclude'));
 });
 
 t('DEFAULT_CONFIG.review_timeout_ms：进程级兜底放宽到 6 小时（2026-10-13 用户拍板取消严格超时，只防挂死）', () => {
@@ -353,4 +376,5 @@ t('review-exec：模块可加载，executeReview 为异步执行函数（后台 
   p.catch(() => {});
 });
 
+await runAll();
 console.log(`\n${n} 项单元自检通过${process.exitCode ? '（有失败）' : '，全部 OK'}`);

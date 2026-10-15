@@ -14,7 +14,8 @@
  *
  * 零敏感：不包含任何平台标识；模型/凭据信息全部来自 DSH 配置。
  */
-import { DEFAULT_CONFIG } from './config.js';
+import { DEFAULT_CONFIG, normalizeConfig } from './config.js';
+import { readFileConfig } from './file-config.js';
 import { locateEngineBin, buildReviewArgs, runEngine, prepareEngineEnv, collectPendingPaths } from './runner.js';
 import { writeReport, repoNameOf } from './report.js';
 import { buildSensitiveBlock } from './sensitive-list.js';
@@ -52,7 +53,19 @@ const OCR_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
  * }
  */
 export async function executeReview(task) {
-  const cfg = { ...DEFAULT_CONFIG, ...(task.config && typeof task.config === 'object' ? task.config : {}) };
+  const snap = task.config && typeof task.config === 'object' ? task.config : {};
+  const cfg = { ...DEFAULT_CONFIG, ...snap };
+  // 并发设置兜底（2026-10-15 修）：任务卡快照由旧版插件写入时**不含并发字段**，直接
+  // 取默认值会静默回落 false（单线）——症状是「设置面板已开启并发，引擎仍收到
+  // --concurrency 1」。因此快照未携带并发字段时，实时读取插件配置文件兜底
+  // （getConfig 热生效语义：执行时以最新配置为准）。快照带了值则仍以快照为准。
+  if (typeof snap.concurrency_enabled !== 'boolean') {
+    const live = normalizeConfig(readFileConfig());
+    cfg.concurrency_enabled = live.concurrency_enabled;
+    if (!Number.isFinite(snap.concurrency)) {
+      cfg.concurrency = live.concurrency;
+    }
+  }
 
   // 1. 定位引擎（设置 > 包内 bin > PATH）。
   const located = locateEngineBin(cfg);
