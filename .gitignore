@@ -63,3 +63,6 @@ docs/
 scripts/probe-*.mjs
 _asar-*
 _asar-out/
+
+# npm lock：开发机记录的是本机 junction 绝对路径（含用户名），对使用者无意义，不入库
+package-lock.json

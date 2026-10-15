@@ -12,17 +12,55 @@
  *   ③ schema.toJSON()（客户端渲染源）是否可序列化。
  *
  * 运行：node scripts/settings-register-repro.mjs
- * （零网络；依赖仓库 node_modules 的 schemastery + 生产依赖树的 dsh-settings）
+ * （零网络；依赖仓库 node_modules 的 schemastery + 生产依赖树的 dsh-settings。
+ *   生产依赖树路径不硬编码：由 resolveHostEntry 动态探测，可用环境变量
+ *   DSH_PROD_NODE_MODULES 显式指定——便于在本机之外的机器上复现。）
  */
 import { pathToFileURL } from 'node:url';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+/**
+ * 解析「宿主依赖树」（生产 DSH 安装）中某个 @deepseek-ai 子包的入口文件。
+ *
+ * 公开仓库不硬编码任何本机绝对路径：按候选根目录顺序探测，命中即用；
+ * 全不命中时抛出带指引的错误（提示用 DSH_PROD_NODE_MODULES 显式指定）。
+ * 候选来源：
+ *   ① 环境变量 DSH_PROD_NODE_MODULES（显式覆盖，最优先）；
+ *   ② Windows npm 全局：%APPDATA%/npm/node_modules；
+ *   ③ *nix 用户级 npm 全局：~/.npm-global/lib/node_modules；
+ *   ④ DSH profile 依赖层：~/.dsh/profiles/node_modules（含指向全局包的 junction）。
+ * 每个根下再尝试两种布局：`@deepseek-ai/dsh/node_modules/@deepseek-ai/<pkg>`
+ * （嵌套在生产包内）与 `@deepseek-ai/<pkg>`（直接挂载）。
+ */
+function resolveHostEntry(pkgName) {
+  const candidates = [];
+  if (process.env.DSH_PROD_NODE_MODULES) {
+    candidates.push(process.env.DSH_PROD_NODE_MODULES);
+  }
+  if (process.env.APPDATA) {
+    candidates.push(join(process.env.APPDATA, 'npm', 'node_modules'));
+  }
+  candidates.push(join(homedir(), '.npm-global', 'lib', 'node_modules'));
+  candidates.push(join(homedir(), '.dsh', 'profiles', 'node_modules'));
+
+  for (const root of candidates) {
+    const nested = join(root, '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', pkgName, 'lib', 'index.js');
+    if (existsSync(nested)) return nested;
+    const flat = join(root, '@deepseek-ai', pkgName, 'lib', 'index.js');
+    if (existsSync(flat)) return flat;
+  }
+  throw new Error(
+    `找不到宿主依赖树中的 @deepseek-ai/${pkgName}。` +
+      '请设置环境变量 DSH_PROD_NODE_MODULES 指向生产依赖树的 node_modules 根目录（其下应有 @deepseek-ai/dsh）。' +
+      `\n已尝试的候选根：\n  ${candidates.join('\n  ')}`
+  );
+}
 
 /* ── 宿主同款运行环境（生产依赖树装载，同一棵 cordis/schemastery） ── */
-const CORDIS_URL = pathToFileURL(
-  'C:/Users/HP/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js'
-).href;
-const PROVIDER_URL = pathToFileURL(
-  'C:/Users/HP/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-settings/lib/index.js'
-).href;
+const CORDIS_URL = pathToFileURL(resolveHostEntry('cordis')).href;
+const PROVIDER_URL = pathToFileURL(resolveHostEntry('dsh-settings')).href;
 const { Context } = await import(CORDIS_URL);
 const { SettingsProvider } = await import(PROVIDER_URL);
 
