@@ -1,0 +1,31 @@
+dsh-code-review
+Copyright 2026 dsh-code-review contributors
+
+This product includes software developed at Alibaba Group
+(https://github.com/alibaba/open-code-review), used under the
+Apache License, Version 2.0.
+
+================================================================================
+第三方组件归属声明（Third-party attribution）
+================================================================================
+
+本仓库的评审引擎（源码目录 engine/，以及随 GitHub Release 分发的二进制
+bin/codecheck(.exe)）是 open-code-review 的 fork 改造：
+
+  项目名称   : open-code-review
+  上游地址   : https://github.com/alibaba/open-code-review
+  版权归属   : Copyright 2026 alibaba/open-code-review Contributors
+  许可协议   : Apache License 2.0
+
+修改声明（Apache-2.0 §4(b)）：
+  本仓库对引擎源码做了 fork 改造，主要涉及——Windows 下子进程隐藏窗口、
+  跨平台进程树终止、敏感内容排除（不将命中敏感路径的文件内容送审），以及
+  若干上游评审项（R1–R8）的整改。修改后的源码位于 engine/，每个源码文件头
+  保留上游的 `SPDX-License-Identifier: Apache-2.0` 与版权声明。
+
+许可与声明保留（Apache-2.0 §4(a)(c)）：
+  上游完整许可文本见 engine/LICENSE；引擎内嵌图标的上游归属声明见
+  engine/internal/viewer/static/icons/NOTICE，均按原样保留。
+
+本仓库自身代码（src/、scripts/、client.js、std-facet.js 等）同样以
+Apache License 2.0 发布，完整文本见根目录 LICENSE。

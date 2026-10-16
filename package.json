@@ -18,7 +18,8 @@
     "dsh-plugin.json",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "check": "node --check src/index.js && node --check src/config.js && node --check src/settings-schema.js && node --check src/plugin-config.js && node --check src/exec-context.js && node --check src/result-text.js && node --check src/runner.js && node --check src/report.js && node --check src/sensitive-list.js && node --check src/model-provider.js && node --check src/credentials.js && node --check src/review-exec.js && node --check src/task-book.js && node --check src/task-api.js && node --check src/serve-entry.js && node --check src/file-config.js && node --check src/set-config-tool.js && node --check client.js && node --check std-facet.js",
