@@ -17,5 +17,20 @@ indent_size = 2
 [*.go]
 indent_style = tab
 
-[Makefile]
+# 普通 makefile 与显式命名片段统一 tab 缩进（`[Makefile]` 只覆盖恰好叫
+# Makefile 的文件；glob 扩到 makefile/GNUmakefile/*.mk）。未匹配的其它无扩展
+# 名片段不属于任何缩进组，由编辑器默认决定，属有意留白。
+[{Makefile,makefile,GNUmakefile,*.mk}]
 indent_style = tab
+
+# 引擎目录（engine/）为上游 open-code-review 的 vendored fork：关闭激进的
+# 空白重写（补末行换行/去行尾空格），保持引擎侧原始风格，避免每次上游同步
+# 产生整树噪声 diff 与合并冲突。insert_final_newline 置 unset（而非 false）：
+# Go 的 gofmt 强制源码以换行结尾，false 会让编辑器反过来**去掉**末行换行，
+# 与 gofmt 产出冲突、每次格式化都在 diff 里抖动。charset/end_of_line 置 unset
+# = 不强制、跟随文件现状（EditorConfig 对 unset 的定义）。
+[engine/**]
+insert_final_newline = unset
+trim_trailing_whitespace = false
+end_of_line = unset
+charset = unset

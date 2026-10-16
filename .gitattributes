@@ -1,10 +1,28 @@
 # 换行与二进制识别
 * text=auto
 
-# 二进制文件不参与行尾转换 / diff 文本化
+# 脚本类行尾显式固定：.sh 恒 LF（跨平台 shell 语义）——不依赖客户端
+# core.autocrlf 配置，避免同一脚本在 win/mac 检出后格式漂移产生脏 diff。
+# 根级不声明 .ps1 行尾（仓库唯一 .ps1 在 engine/ 下，由 engine/.gitattributes
+# 的 `* text=auto eol=lf` 统一管辖——引擎政策 = LF）；未来在仓库根或其他目录
+# 新增 .ps1 时，再按所在目录的行尾政策单独声明。
+*.sh text eol=lf
+
+# 二进制文件不参与行尾转换 / diff 文本化（补齐常见二进制/资源类型，避免命中
+# 上方 `* text=auto` 被按文本做行尾归一化 -> 内容损坏或巨大脏 diff）
 *.exe binary
 *.png binary
 *.jpg binary
 *.jpeg binary
 *.gif binary
 *.pdf binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.jar binary
+*.so binary
+*.dll binary
+*.mp4 binary
+*.xlsx binary

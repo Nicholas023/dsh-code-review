@@ -5,6 +5,13 @@
 # ============================================================
 
 # ---------- 敏感信息（红线，一个都不允许进历史） ----------
+# 凭据/密钥文件：精确名 + 常见后缀逐一枚举，另补带点号前缀/后缀形态的兜底
+# 通配（`*.credentials.*` / `*.secrets.*`——gitignore 的 `*` 可匹配零字符，
+# `.credentials.yaml` 这类点号前缀名也被覆盖，不再单列）。通配之所以限制为
+# 「带点号」形态：裸 `credentials*` / `secrets*` 会过度匹配，把
+# src/credentials.js 这类合法源码一起忽略（git check-ignore 验证过）——
+# 本仓库是「防开盒插件」，自己先开盒就是笑话，枚举与兜底兼顾零误伤。
+# 无法穷尽一切变体（凭据改存成别的名字），剩余靠提交前 git status 人工过目兜底。
 .env
 .env.*
 !.env.example
@@ -13,13 +20,34 @@
 *.p12
 *.pfx
 *.jks
+*.keystore
+*.ppk
+*.p8
 id_rsa
 id_dsa
+id_ecdsa
 id_ed25519
-.credentials.yaml
-*.credentials.yaml
 credentials
+.credentials
+credentials.json
+credentials.yml
+credentials.yaml
+credentials.ini
+credentials.toml
+credentials.conf
+credentials.txt
+*.credentials.*
 .secrets
+.secrets.json
+.secrets.yml
+.secrets.yaml
+*.secrets.*
+# 凭据类模式**刻意不锚定根**（不写 / 前缀）——与上方 /docs/、/AGENTS.md 等
+# 「开发材料锚定根目录」的策略不同：凭据文件在任何路径出现都必须拦截，
+# engine/ 子树上也一样（不锚定才不会被 engine/ 内的同名文件绕过）。
+.npmrc
+.git-credentials
+*.netrc
 
 # ---------- Node / DSH 插件 ----------
 node_modules/
@@ -35,8 +63,11 @@ pnpm-debug.log*
 engine/bin/
 *.exe
 *.test
+# 覆盖率产物只忽略有产出的专有名：coverage.out 是 go test 的标准 coverprofile
+# 输出名；engine/ 内的命中由 engine/.gitignore 负责，此处兜底**仓库根**的
+# 产物（go test 在仓库根目录直接跑也会产出 coverage.out）。不做 `*.out` 全名
+# 通配——过宽会静默忽略本应入库的合法 .out 文件（如测试金样）。
 coverage.out
-*.out
 
 # ---------- 运行时产物 ----------
 # 评审报告留档（按日期/仓库存放）为运行时产物，不入库
@@ -53,16 +84,20 @@ Desktop.ini
 *.tmp
 *.bak
 
-# ---------- 本地保留的开发文档与侦查产物（不进公开仓库） ----------
-# 这些是本项目开发过程文档 / 侦查产物，发布仓库只含最简可发布文件集。
-# 注：路径模式用不含特定文档名的通用写法（净化流程会清掉敏感词）。
-AGENTS.md
+# ---------- npm lockfile ----------
+# package-lock.json 已入库——锁死传递依赖保证可复现安装。
+# 旧版注释「本机 junction 绝对路径」问题由重新生成规范 lockfile 解决。
+
+# ---------- 本地开发/归档材料 ----------
+# 公开仓库 git add -A 会把 AGENTS.md / docs/ 设计过程稿 / probe 实验脚本
+# 一起扫进历史——本项目主题是防开盒，自身仓库更必须先守住。
+# 锚定说明：AGENTS.md 与 docs/ 都锚定**仓库根**（/ 前缀）——它们只忽略根目录
+# 的归档材料；不锚定会顺带忽略 engine/docs/ 这类 vendored 子树内的同名文档
+# （引擎已整树入库，未来上游同步新增的文档文件若被 ignore 拦截，会在
+# git add -A 后静默消失于 status，属于「无声丢文件」）。
+/AGENTS.md
+/docs/
 /任务*.md
 /踩*记录.md
-docs/
-scripts/probe-*.mjs
-_asar-*
-_asar-out/
-
-# npm lock：开发机记录的是本机 junction 绝对路径（含用户名），对使用者无意义，不入库
-package-lock.json
+/scripts/probe-*.mjs
+/_asar-*/
