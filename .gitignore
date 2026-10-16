@@ -101,3 +101,6 @@ Desktop.ini
 /踩*记录.md
 /scripts/probe-*.mjs
 /_asar-*/
+# 引擎二进制产物（构建可复现，从 GitHub Releases 分发，不入库）
+bin/
+
