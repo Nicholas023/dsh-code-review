@@ -100,7 +100,9 @@ export function resolveApiKey(_ctx, envName, io = {}) {
   return readCredentialsYaml(name);
 }
 
-/** 判定 key 是否缺失（供工具结果给出明确降级文案）。 */
+/** 判定 key 是否缺失或为空（供工具结果给出明确降级文案）。
+ *  null（键不存在）与 ''（显式空值）统一视为缺失——两者在降级意义上等效
+ *  （均无法用于认证）。若需区分「未配置」与「配了空值」，直接比对 null / ''。 */
 export function isKeyMissing(key) {
   return typeof key !== 'string' || key.trim() === '';
 }

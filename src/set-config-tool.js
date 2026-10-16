@@ -24,6 +24,9 @@ import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { cwdOfExec } from './exec-context.js';
 
+/** 平台判定单点（避免 process.platform 内联比较散落各处——风格红线）。 */
+const IS_WIN = process.platform === 'win32';
+
 /** 配置工具名（独立于 code_review / code_review_status 的第三入口）。 */
 export const SET_CONFIG_TOOL_NAME = 'code_review_set_config';
 
@@ -112,8 +115,8 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
         // 非字符串一律按 null（占位清空语义）处理，绝不做隐式字符串化。
         if (v === null || v === undefined) return null;
         if (typeof v !== 'string') return null;
-        const s = v;
-        return s.trim() === '' ? null : s.trim();
+        const trimmed = v.trim();
+        return trimmed === '' ? null : trimmed;
       };
       const patch = {
         ...(args?.review_model !== undefined ? { review_model: normalizeValue(args.review_model) } : {}),
@@ -135,7 +138,7 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
       // expandHome 的判定面一致。
       // 严格双判（!== null && !== undefined）：normalizeValue 只产出 string|null，
       // undefined 不可达，但防御未来改动引入。
-      // 引擎路径校验结果；null = 通过或无需校验（
+      // 引擎路径校验结果；null = 通过或无需校验。
       // 校验失败不再整体拒绝本次写入——与「逐字段合并」语义一致：只剔除
       // engine_bin，其余字段照常落盘，原因进回显；整单只剩该字段时下方
       // 统一按拒绝收尾，保证失败可见）。
@@ -163,7 +166,7 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
           // engine_bin 会同时试字面与加 .exe 两个形态（EXE 候选），校验只查
           // 字面会把 `C:\tools\codecheck` 这类合法输入误拒（用户手里就是
           // codecheck.exe）。字面不存在时回退候选 + '.exe'，命中则落盘该形态。
-          if (process.platform === 'win32'
+          if (IS_WIN
             && (!existsSync(candidate) || !statSync(candidate).isFile())) {
             const withExe = `${candidate}.exe`;
             if (existsSync(withExe) && statSync(withExe).isFile()) candidate = withExe;

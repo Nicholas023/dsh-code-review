@@ -206,7 +206,7 @@ export function buildReviewArgs(opts) {
     if (patterns.length > 0) args.push('--exclude', patterns.join(','));
   }
   if (opts.focus) args.push('--background', opts.focus);
-  // 并发（设置面板控制，成本控制权在用户。
+  // 并发：设置面板控制，成本控制权在用户。
   //  - 未开启 → 显式 --concurrency 1（单线，行为确定；引擎 agent.go 默认 ≤0 → 8，
   //    不传会随引擎默认漂移，违反「未开启 = 单线」的用户语义）；
   //  - 开启   → --concurrency <n>（钳制 1..32，默认 8——与引擎默认对齐）。
@@ -269,7 +269,7 @@ export function runEngine({ bin, args, timeoutMs = 6 * 60 * 60 * 1000, env = {} 
     }
 
     const timer = setTimeout(() => {
-      // 超时终止（
+      // 超时终止：
       //  1) 先 SIGTERM 协作式终止；引擎若忽略则残留进程会长期占用 serve 锁/
       //     资源——宽限期（KILL_GRACE_MS）后升级 SIGKILL 强杀；
       //  2) Windows 无进程组信号，child.kill 只终止直接子进程，引擎派生的

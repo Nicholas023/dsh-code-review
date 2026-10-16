@@ -107,7 +107,7 @@ export function buildSensitiveBlock(pendingPaths) {
     // 路径未经转义直接进反引号代码块——git 文件名可含
     // 反引号/换行（git 允许），会闭合代码块并向报告注入任意 markdown。拼接前
     // 剔除反引号与换行（点名目的是人眼确认路径，替换为空格不影响辨识）。
-    const safe = String(h.path).replace(/[`\r\n]+/g, ' ');
+    const safe = String(h.path).replace(/[`\r\n*_[\]<>|]+/g, ' ');
     return `${i + 1}. \`${safe}\``;
   });
   return [

@@ -139,7 +139,7 @@ async function dispatchReview(args, cfg, opts = {}) {
     const exec = await executeReview(task);
     return {
       ok: exec.ok,
-      taskId: null, // 回退为同步执行，任务从未入队——不给假 id（
+      taskId: null, // 回退为同步执行，任务从未入队——不给假 id
       serveAlive: false,
       text: buildSyncResultText(exec),
       syncFallback: `serve 未能启动（${serve.reason ?? '未知原因'}），本次已回退同步执行。`,

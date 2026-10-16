@@ -57,7 +57,6 @@ const ALLOWED = Object.fromEntries(
  * 过滤出白名单内且类型合法的字段（null/undefined 表示显式清空 → 保留 null 占位，
  * 读取方见到 null 直接跳过，效果 = 恢复默认）。
  *
- * 
  *  - 字符串字段 trim 后为空 → 按「显式清空」写 null 占位（而不是把空格串/空串
  *    当合法覆盖落盘——engine_bin 之类接受空串的键会从「未设置」变成「显式空路径」）；
  *  - 数值字段必须 Number.isFinite（拒绝 NaN/Infinity——否则 JSON.stringify 会

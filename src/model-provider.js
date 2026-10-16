@@ -62,7 +62,7 @@ function loadProfileLlmConfig() {
   try {
     yaml = require('js-yaml');
   } catch {
-    return null; // 开发环境若 junction 未建也能继续（走 ctx/静态兜底）
+    return null; // 开发环境若 junction 未建也能继续（路由表可能为空，resolveProvider 返回 null）
   }
   const profilesRoot = join(homedir(), '.dsh', 'profiles');
   // readdirSync 包 try/catch——目录无读权限（EACCES）或
@@ -87,7 +87,8 @@ function loadProfileLlmConfig() {
     if (!existsSync(patch)) continue;
     try {
       const doc = yaml.load(readFileSync(patch, 'utf8'));
-      const rows = Array.isArray(doc?.services) ? doc.services : Array.isArray(doc) ? doc : [];
+      let rows = Array.isArray(doc) ? doc : [];
+      if (Array.isArray(doc?.services)) rows = doc.services;
       for (const row of rows) {
         if (typeof row?.id !== 'string') continue;
         const cfg = row.config ?? {};
@@ -128,6 +129,16 @@ function isOfficialPaidUrl(u) {
 }
 
 /**
+ * 转义 routeKey 中的分隔符 `|`：routeKey 形如 `${providerLabel}|${modelId}`，
+ * 显示名含 `|` 会让键含歧义（无法唯一还原 label/modelId）。label 侧转义为 `\|`。
+ * @param {string} label 显示名。
+ * @returns {string} 转义后的 label。
+ */
+function escapeRouteLabel(label) {
+  return String(label).replace(/\|/g, '\\|');
+}
+
+/**
  * 把 DSH 模型配置归一成统一路由表：
  * [{ modelId, displayLabel, providerLabel, url, keyEnv, protocol, thinkingFormat?, source }]
  * source: 'config-deepseek' | 'config-alternate'
@@ -158,20 +169,22 @@ function buildModelRoutes() {
       ? deepCfg.displayName.trim()
       : DEEPSEEK_OFFICIAL_DEFAULT.providerLabel;
     // 判定用 trim、返回也 trim：配置值带首尾空白时「判定通过」但原样下发，
-    // 端点字符串里混入空格会让 HTTP 层拼出坏 URL（或 key 引用名带空格，
-    // credentials 解析不到）。判定与产出必须同一清洗口径。
+    // 端点字符串里混入空格会让 HTTP 层拼出坏 URL。判定与产出必须同一清洗口径。
+    const hasBaseURL = typeof deepCfg?.baseURL === 'string' && deepCfg.baseURL.trim();
     const url = typeof deepCfg?.baseURL === 'string' && deepCfg.baseURL.trim() ? deepCfg.baseURL.trim() : DEEPSEEK_OFFICIAL_DEFAULT.url;
     // 官方付费通道红线（用户拍板）：baseURL 未配置 → 落到官方默认
     // 端点（api.deepseek.com + DEEPSEEK_API_KEY），整组 deep 路由**不生成**。
     // 账号体系适配器只配 models（serve 无会话上下文时账号体系不可复用），
     // 留下这批路由等于给「解析失败回退表首」埋官方付费入口。第三方兼容网关
     // 显式配了非官方 baseURL 的照常生成，不受影响。
-    const isOfficialPaid = isOfficialPaidUrl(url);
-    const keyEnv = typeof deepCfg?.apiKeyEnv === 'string' && deepCfg.apiKeyEnv.trim() ? deepCfg.apiKeyEnv.trim() : DEEPSEEK_OFFICIAL_DEFAULT.keyEnv;
-    const protocol = engineProtocolOf(deepCfg?.api);
-    const m = deepCfg.models;
-    const models = Array.isArray(m) ? m : [];
-    if (!isOfficialPaid) {
+    // 判定提前短路：未配 baseURL 或端点为官方付费默认时直接跳过——
+    // keyEnv/protocol 只在确认非官方后才计算，避免 isOfficialPaid 一旦被绕过
+    // 时用官方默认 keyEnv（DEEPSEEK_API_KEY）拼出一条可用付费路由。
+    if (hasBaseURL && !isOfficialPaidUrl(url)) {
+      const keyEnv = typeof deepCfg?.apiKeyEnv === 'string' && deepCfg.apiKeyEnv.trim() ? deepCfg.apiKeyEnv.trim() : DEEPSEEK_OFFICIAL_DEFAULT.keyEnv;
+      const protocol = engineProtocolOf(deepCfg?.api);
+      const m = deepCfg.models;
+      const models = Array.isArray(m) ? m : [];
       for (const mm of models) {
         const id = mm?.id ?? mm?.name;
         if (!id) continue;
@@ -184,7 +197,7 @@ function buildModelRoutes() {
           protocol,
           source: 'config-deepseek',
           thinkingFormat: mm?.thinkingFormat,
-          routeKey: `${deepLabel}|${String(id)}`,
+          routeKey: `${escapeRouteLabel(deepLabel)}|${String(id)}`,
         });
       }
     }
@@ -207,7 +220,7 @@ function buildModelRoutes() {
         for (const mm of models) {
           const id = mm?.id ?? mm?.name;
           if (!id) continue;
-          const label = typeof p?.displayName === 'string' && p.displayName ? p.displayName : pname;
+          const label = typeof p?.displayName === 'string' && p.displayName.trim() ? p.displayName.trim() : pname;
           routes.push({
             modelId: String(id),
             displayLabel: mm?.name ?? String(id),
@@ -217,7 +230,7 @@ function buildModelRoutes() {
             protocol: engineProtocolOf(p?.api),
             thinkingFormat: compat.thinkingFormat,
             source: 'config-alternate',
-            routeKey: `${label}|${String(id)}`,
+            routeKey: `${escapeRouteLabel(label)}|${String(id)}`,
           });
         }
       }
@@ -240,7 +253,7 @@ function buildModelRoutes() {
 /**
  * 创建模型源（评审模型选项 + 端点解析）。
  *
- * @param {object} [ctx] DSH 会话上下文（apply 里的 ctx；无 ctx 时走配置/兜底，便于开发期测试）。
+ * @param {object} [ctx] DSH 会话上下文（apply 里的 ctx；无 ctx 时走配置，路由表为空则 resolveProvider 返回 null）。
  * @returns {{
  *   listCandidates: () => Array<{value:string, label:string, description?:string, source?:string}>,
  *   currentSessionModel: () => string|'',

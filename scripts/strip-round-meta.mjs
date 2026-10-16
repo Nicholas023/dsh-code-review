@@ -22,7 +22,7 @@
  * 处理范围：src/**、scripts/**、根 client.js、std-facet.js（.js/.mjs）。
  * 不触碰 engine/、docs/、根 README 等（非发布源码注释或已手工处理）。
  */
-import { readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, lstatSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,7 +51,7 @@ function collectFiles() {
       const p = join(dir, f);
       let st;
       try {
-        st = statSync(p);
+        st = lstatSync(p);
       } catch {
         continue; // 竞态删除/无权限：跳过该条目
       }
@@ -66,7 +66,7 @@ function collectFiles() {
   for (const s of SCOPES) walk(s);
   for (const f of ROOT_FILES) {
     try {
-      statSync(f);
+      lstatSync(f);
       out.push(f);
     } catch { /* 文件不存在则跳过 */ }
   }

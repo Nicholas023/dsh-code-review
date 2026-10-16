@@ -255,7 +255,7 @@ t('createModelSource()：未知模型回退表首，路由表空返回 null（�
   );
 });
 t('createModelSource()：listCandidates 首项为 session', () => {
-  const src = createModelSource(undefined, {});
+  const src = createModelSource(undefined);
   const cands = src.listCandidates();
   assert.ok(cands.length >= 2, `候选应≥2（session+模型），实际 ${cands.length}`);
   assert.equal(cands[0].value, SESSION_MODEL);

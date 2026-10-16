@@ -25,6 +25,11 @@ const LIST_LIMIT = 20;
  *  与产品实现共用同一常量的值，杜绝「测试里写死 64KB、实现改了忘记同步」。 */
 export const CONFIG_BODY_LIMIT = 64 * 1024;
 
+/** 请求体分片数上限（约 4096）：字节上限挡不住「海量极小 chunk」洪水——
+ *  总量未超限但 chunks 条目数可被恶意请求推高，先耗尽内存。超过按 too-large
+ *  处理（同 413）。导出供 task-api-smoke 引用同一真源。 */
+export const CONFIG_BODY_MAX_CHUNKS = 4096;
+
 /** SSE 并发连接上限：每个连接独立每 1s 对任务目录做一次指纹扫描，
  *  不限速会让 N 个连接把目录扫描开销线性放大（DoS 面）；超过上限直接拒连。
  *  导出供 task-api-smoke 断言引用（口径同上）。 */
@@ -58,13 +63,18 @@ function json(res, code, body) {
  * 请求体由 node 在响应 flush 完成后自行收尾（destroySoon / 内核反压）。
  *
  * @param {object} req IncomingMessage。
- * @param {number} [limit] 字节上限；超过返回 null（调用方回 413）。
- * @returns {Promise<string|null>} 请求体文本；超限/报错为 null。
+ * @param {number} [limit] 字节上限；超过返回 { kind: 'too-large' }。
+ * @param {number} [maxChunks] 分片数上限；超过（海量小 chunk 洪水）同样判
+ *   too-large，防逐 chunk 累积把内存拖垮。
+ * @returns {Promise<{kind: 'ok', body: string} | {kind: 'too-large'} | {kind: 'aborted'} | {kind: 'error'}>}
+ *   正常读完 = ok（body 为 utf8 文本）；超字节/超分片 = too-large；客户端
+ *   中断 = aborted；网络错误 = error。调用方按 kind 分发 HTTP 状态。
  */
-function readBody(req, limit = CONFIG_BODY_LIMIT) {
+function readBody(req, limit = CONFIG_BODY_LIMIT, maxChunks = CONFIG_BODY_MAX_CHUNKS) {
   return new Promise((resolve) => {
     const chunks = [];
     let size = 0;
+    let chunkCount = 0;
     let settled = false;
     /** 唯一 settle 出口：任意结束路径只 resolve 一次，杜绝重复/悬挂。 */
     const done = (value) => {
@@ -73,26 +83,35 @@ function readBody(req, limit = CONFIG_BODY_LIMIT) {
       resolve(value);
     };
     req.on('data', (chunk) => {
+      // 分片计数上限：字节上限挡不住「海量极小 chunk」洪水——总量未超限，
+      // 但 chunks 数组条目数可被恶意请求推到数十万，先耗尽内存再触发字节限。
+      // 超过上限即按 too-large 处理（与超字节同形），停止收集。
+      chunkCount += 1;
+      if (chunkCount > maxChunks) {
+        done({ kind: 'too-large' });
+        req.pause();
+        return;
+      }
       // chunk 是 Buffer：按字节累计（不再用字符串 length，UTF-16 计数漏洞已封）。
       size += chunk.length;
       if (size > limit) {
         // **不**再调 req.destroy()——destroy 拆掉的是底层
         // socket（Node 文档：message.destroy() 即 socket.destroy()），而路由是
         // 在下一个微任务里才写 413（readBody().then(...)），此时连接已断，413
-        // 永远到不了客户端（只看到连接重置）。done(null) 停止收集并 settle；
+        // 永远到不了客户端（只看到连接重置）。done 停止收集并 settle；
         // req.pause() 停止从内核缓冲继续拉数据（省 CPU/内存），但不拆 socket，
         // 保证随后的 413 仍能送达；未读完的请求体由 node 在响应 flush 后自行
         // 收尾（destroySoon）。
-        done(null);
+        done({ kind: 'too-large' });
         req.pause();
         return;
       }
       // 只收合法数据；超限分支已 return，到这里的数据一律入缓冲。
       chunks.push(chunk);
     });
-    req.on('end', () => done(Buffer.concat(chunks).toString('utf8')));
-    req.on('close', () => done(null)); // 客户端中断也要 settle，避免悬挂
-    req.on('error', () => done(null)); // 网络错误与超限同形（统一判空回 4xx）
+    req.on('end', () => done({ kind: 'ok', body: Buffer.concat(chunks).toString('utf8') }));
+    req.on('close', () => done({ kind: 'aborted' })); // 客户端中断（非「体过大」）
+    req.on('error', () => done({ kind: 'error' })); // 网络错误（与超限区分，回 500）
   });
 }
 
@@ -268,8 +287,14 @@ export function createTaskRoutes() {
     handler: (req, res) => {
       if (req.method !== 'POST') return json(res, 405, { error: 'method-not-allowed' });
       readBody(req)
-        .then((body) => {
-          if (body === null) return json(res, 413, { error: 'payload-too-large' });
+        .then((result) => {
+          // 按 kind 分发：只有「体过大」才是 413；客户端中断（aborted）非
+          // 尺寸问题 → 400；网络错误 → 500。此前三种结束态统一 resolve null
+          // 后一律回 413，把中断/网络错误误报成「payload too large」。
+          if (result.kind === 'too-large') return json(res, 413, { error: 'payload-too-large' });
+          if (result.kind === 'aborted') return json(res, 400, { error: 'request-aborted' });
+          if (result.kind === 'error') return json(res, 500, { error: 'request-error' });
+          const body = result.body;
           let patch;
           try {
             patch = JSON.parse(body || '{}');

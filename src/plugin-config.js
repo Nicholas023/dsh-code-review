@@ -25,7 +25,7 @@
  *  - engine_bin：引擎 codecheck 二进制路径；留空 = 插件包 bin/ 内
  *    或 PATH 中 codecheck。
  *  - first_run：首启引导标记（默认 true = 尚未引导确认）。
- *  - concurrency_enabled：并发评审开关（默认 false = 单线； 加）。
+ *  - concurrency_enabled：并发评审开关（默认 false = 单线；开启 = 并行审查）。
  *  - concurrency：并发广度（默认 8，合法域 1..32；仅开关开启时生效）。
  *
  * 零敏感：不硬编码任何平台内部标识；描述文案不点名任何供应商。

@@ -82,7 +82,7 @@ export function reportFilePath({ reportDir, repoPath, now = new Date() }) {
   const hms = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   const ms = String(now.getMilliseconds()).padStart(3, '0');
   const name = repoNameOf(repoPath);
-  return resolve(join(base, ymd, `${name}-${hms}${ms}.md`));
+  return resolve(join(base, ymd, `${name}-${hms}.${ms}.md`));
 }
 
 /**
