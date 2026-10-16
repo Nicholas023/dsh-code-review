@@ -1,0 +1,112 @@
+name: CI
+
+# 发布前门禁：语法检查（JS + Go）、冒烟矩阵、敏感扫描三组。
+# 红线：四个 e2e（e2e-engine / e2e-plugin / e2e-switch / e2e-sensitive）需要真实
+# 凭据与联网，会触碰付费通道，**严禁**纳入 CI。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ① 语法与静态检查：JS node --check + 引擎侧 gofmt / go vet。
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: JS 语法检查（npm run check）
+        run: npm run check
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.9'
+      - name: gofmt 检查（必须无输出）
+        working-directory: engine
+        shell: bash
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$out"
+            exit 1
+          fi
+      - name: go vet
+        working-directory: engine
+        run: go vet ./...
+
+  # ② 冒烟矩阵（隔离环境，不联网、不触付费通道）。
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: unit-smoke
+        run: node scripts/unit-smoke.mjs
+      - name: file-config-smoke
+        run: node scripts/file-config-smoke.mjs
+      - name: task-api-smoke
+        run: node scripts/task-api-smoke.mjs
+      - name: cordis-entry-smoke
+        run: node scripts/cordis-entry-smoke.mjs
+      - name: client-bundle-smoke
+        run: node scripts/client-bundle-smoke.mjs
+      - name: serve-smoke
+        run: node scripts/serve-smoke.mjs
+
+  # ③ 敏感扫描三组：任一命中数 > 0 即失败（内容级权威判据）。
+  sensitive:
+    name: sensitive (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 敏感扫描三组
+        shell: bash
+        run: |
+          fail=0
+          scan() {
+            name="$1"
+            pat="$2"
+            cnt=$(git grep -I -E "$pat" -- . ':!engine/**' | wc -l | tr -d ' ')
+            echo "[$name] hits=$cnt"
+            if [ "$cnt" != "0" ]; then
+              fail=1
+              git grep -I -n -E "$pat" -- . ':!engine/**' || true
+            fi
+          }
+          scan sk       'sk-[A-Za-z0-9]{16,}'
+          scan platform '(CUCC|GLM|10\.186|dsh-llm-)'
+          scan account  'llm-deepseek-account'
+          if [ "$fail" != "0" ]; then
+            echo "敏感扫描命中，禁止合入。"
+            exit 1
+          fi
+          echo "敏感扫描三组全部 0 命中。"
