@@ -91,11 +91,17 @@ jobs:
       - name: 敏感扫描三组
         shell: bash
         run: |
+          # 模式串用「字符类断字」（如 C[U]CC）书写：避免本工作流文件自身文本
+          # 被自己的正则命中（否则 ci.yml 里那几个平台/账号类字面量会恒报 1 命中）。
+          # 语义与任务书三组模式完全一致。
           fail=0
           scan() {
             name="$1"
             pat="$2"
-            cnt=$(git grep -I -E "$pat" -- . ':!engine/**' | wc -l | tr -d ' ')
+            # GitHub Actions 的 bash 带 `-e -o pipefail`：git grep 0 命中时退出码 1，
+            # 会让整条管道失败并触发 set -e。`|| true` 只吞掉「无命中」的退出码，
+            # 命中计数仍来自 wc -l（0 命中 → 计数 0）。
+            cnt=$(git grep -I -E "$pat" -- . ':!engine/**' | wc -l | tr -d ' ' || true)
             echo "[$name] hits=$cnt"
             if [ "$cnt" != "0" ]; then
               fail=1
@@ -103,8 +109,8 @@ jobs:
             fi
           }
           scan sk       'sk-[A-Za-z0-9]{16,}'
-          scan platform '(CUCC|GLM|10\.186|dsh-llm-)'
-          scan account  'llm-deepseek-account'
+          scan platform '(C[U]CC|G[L]M|10\.186|dsh-llm[-])'
+          scan account  'llm-deepseek-accoun[t]'
           if [ "$fail" != "0" ]; then
             echo "敏感扫描命中，禁止合入。"
             exit 1

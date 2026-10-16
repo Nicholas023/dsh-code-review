@@ -229,20 +229,34 @@ t('createSettingsSchema(带模型列表) 接收选项（步骤5 动态选项位�
 });
 
 /* ---------- 7. model-provider（步骤5） ---------- */
-t('createModelSource()：session 无会话上下文 → 表首回退，绝不落官方付费端点（红线）', () => {
+// 密闭化：路由来自本机 ~/.dsh/profiles，CI / 新克隆等干净环境无路由。
+// 断言对「有路由」与「无路由」两种环境都成立（两条都是红线要求的行为）：
+//   - 有用户配置路由 → session/未知模型都回退表首，绝不落官方付费端点；
+//   - 无任何路由 → 返回 null（官方付费兜底已移除），由调用方报错并提示配置。
+t('createModelSource()：session 无会话上下文 → 表首回退；无路由 → null（绝不落官方付费端点·红线）', () => {
   const src = createModelSource(undefined);
+  const hasRoutes = src.listCandidates().length >= 2;
   const ep = src.resolveProvider(SESSION_MODEL);
-  assert.ok(ep, '本机有用户配置路由，应解析出端点');
+  if (!hasRoutes) {
+    assert.equal(ep, null, '无用户配置路由 → null（红线：不落官方付费端点，由调用方报错）');
+    return;
+  }
   // 红线：官方付费兜底已整体移除——session 拿不到会话模型时
   // 走 routes 表首（用户配置优先），任何路径都不得隐式落到官方付费端点。
+  assert.ok(ep, '有用户配置路由，应解析出端点');
   assert.notEqual(ep.url, DEEPSEEK_OFFICIAL_DEFAULT.url, '不得回退官方付费端点');
   assert.ok(ep.url && ep.model && ep.protocol, '回退端点/模型/协议必非空');
   assert.equal(ep.resolvedFrom, 'fallback', 'session 兜底应标 fallback');
 });
-t('createModelSource()：未知模型回退表首，路由表空返回 null（官方兜底已禁用）', () => {
+t('createModelSource()：未知模型回退表首；无路由 → null（官方兜底已禁用）', () => {
   const src = createModelSource(undefined);
+  const hasRoutes = src.listCandidates().length >= 2;
   const ep = src.resolveProvider('no-such-model-xyz');
-  assert.ok(ep, '本机路由表非空，未知模型应回退表首（非 null）');
+  if (!hasRoutes) {
+    assert.equal(ep, null, '无路由表 → null（官方兜底已禁用）');
+    return;
+  }
+  assert.ok(ep, '有路由表，未知模型应回退表首（非 null）');
   // + 红线：回退优先第一条有 url 的既有路由（保持用户
   // 配置的端点/凭证/协议语义）；**路由表全空返回 null**（旧行为=回官方付费
   // 默认，已移除）——由调用方（review-exec）失败并提示配置，绝不隐式花钱。
@@ -257,7 +271,7 @@ t('createModelSource()：未知模型回退表首，路由表空返回 null（�
 t('createModelSource()：listCandidates 首项为 session', () => {
   const src = createModelSource(undefined);
   const cands = src.listCandidates();
-  assert.ok(cands.length >= 2, `候选应≥2（session+模型），实际 ${cands.length}`);
+  assert.ok(cands.length >= 1, `候选至少含 session，实际 ${cands.length}`);
   assert.equal(cands[0].value, SESSION_MODEL);
   assert.ok(cands[0].label.includes('会话'), cands[0].label);
 });
