@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { DEFAULT_CONFIG } from '../src/config.js';
+import { locateEngineBin } from '../src/runner.js';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const home = mkdtempSync(join(tmpdir(), 'dcr-serve-smoke-'));
@@ -79,6 +80,11 @@ serve.stdout.on('data', (d) => { serveLog += d; });
 serve.stderr.on('data', (d) => { serveLog += d; });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 引擎可用性：CI / 新克隆无 bin/codecheck（构建产物不入库，走 Release 分发）
+// → 任务会「秒失败」，观察不到 queued→running 的瞬时中间态。此时改断言
+// 「已被 serve 拾起并离开 queued」（同样证明后台链路走通）；本机有引擎时
+// 仍严格断言观察到 running。判据与 unit-smoke 的密闭化同一原则。
+const engineAvailable = Boolean(locateEngineBin({ ...DEFAULT_CONFIG, engine_bin: '' }));
 let sawRunning = false;
 let finalStatus = 'queued';
 const deadline = Date.now() + 45_000;
@@ -90,7 +96,13 @@ while (Date.now() < deadline) {
   await sleep(400);
 }
 
-check('serve 拾起任务：queued → running（后台链路通）', sawRunning, `末状态=${finalStatus}`);
+check(
+  'serve 拾起任务：queued → running（后台链路通）',
+  engineAvailable ? sawRunning : finalStatus !== 'queued',
+  engineAvailable
+    ? `末状态=${finalStatus}`
+    : `无引擎环境（CI/新克隆）：已被拾起并执行，末状态=${finalStatus}`
+);
 check('serve 单例 pid 文件存在', existsSync(tb.PID_FILE), tb.PID_FILE ? '' : '');
 
 // 引擎已真实启动（任务要么 done/failed，要么仍在 running——都说明引擎进程起了）。
