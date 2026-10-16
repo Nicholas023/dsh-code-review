@@ -20,5 +20,18 @@ import { apply as coreApply } from './src/index.js';
  * @returns {Function}   卸载函数（转发核心 apply 的 dispose，若存在）。
  */
 export function mount(ctx, raw) {
-  return coreApply(ctx, raw);
+  // 入参校验（作为 dsh-std 宿主入口，核心 apply 会立即解引用
+  // ctx（inject/effect 等服务）。实参形态与 Cordis 形态不一致或 ctx 缺失
+  // 时，此前会在核心内部抛出难以定位的 TypeError——这里显式拦下，带插件名前缀。
+  // tools 不强制要求——核心 apply 对工具注册失败
+  // 有降级路径（try/catch + 提示，会话自然语言触发不可用但插件其余能力正常）；
+  // 此处只拦「核心必然解引用且无降级」的 inject/effect 形状错误。
+  if (!ctx || typeof ctx.inject !== 'function' || typeof ctx.effect !== 'function') {
+    throw new TypeError('[dsh-code-review] std-facet mount: 需要合法的宿主 ctx（缺少 inject/effect 能力）');
+  }
+  // 返回兜底（JSDoc 承诺返回卸载函数。核心 apply 若在中途抛错
+  // 或上游改为返回 void，宿主卸载阶段会拿到 undefined 而非可调用对象——锁定
+  // 契约：始终返回函数。
+  const dispose = coreApply(ctx, raw);
+  return typeof dispose === 'function' ? dispose : () => {};
 }

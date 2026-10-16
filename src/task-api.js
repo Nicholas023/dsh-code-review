@@ -1,5 +1,5 @@
 /**
- * src/task-api.js —— 后台评审任务的宿主可见面（2026-10-13「GUI 可见」落地之一）。
+ * src/task-api.js —— 后台评审任务的宿主可见面（「GUI 可见」落地之一）。
  *
  * 提供三件事，全部挂在宿主原生能力上（不依赖任何第三方插件）：
  *   1. **完成推送**：轮询任务簿，发现新 done/failed 且未推送过的任务 →
@@ -20,8 +20,16 @@ import { writeFileConfig } from './file-config.js';
 
 const LIST_LIMIT = 20;
 
-/** 配置写接口的请求体上限（设置面板只发两个小字段，4KB 足够；64KB 兜底）。 */
-const CONFIG_BODY_LIMIT = 64 * 1024;
+/** 配置写接口的请求体上限（设置面板只发两个小字段，4KB 足够；64KB 兜底）。
+ *  导出供 task-api-smoke 断言引用（烟雾测试
+ *  与产品实现共用同一常量的值，杜绝「测试里写死 64KB、实现改了忘记同步」。 */
+export const CONFIG_BODY_LIMIT = 64 * 1024;
+
+/** SSE 并发连接上限：每个连接独立每 1s 对任务目录做一次指纹扫描，
+ *  不限速会让 N 个连接把目录扫描开销线性放大（DoS 面）；超过上限直接拒连。
+ *  导出供 task-api-smoke 断言引用（口径同上）。 */
+export const SSE_MAX_CONNECTIONS = 10;
+let sseActiveConnections = 0;
 
 /** node:http 风格 JSON 响应。 */
 function json(res, code, body) {
@@ -36,25 +44,55 @@ function json(res, code, body) {
 /**
  * 读取请求体（宿主 webServer 透传 node http IncomingMessage，需自行收集）。
  *
+ * 旧实现存在两个缺陷 ——
+ * ① 超限分支只调 req.destroy()：被销毁的 req 通常只发 'close'/'aborted' 而不发
+ *    'end'，Promise 既不 resolve 也不 reject（handler 永远不返回 413，连接与
+ *    Promise 一起泄漏）；② body.length 是 UTF-16 字符数而非字节数，含多字节
+ *    字符的请求体可绕过 64KB 字节上限；且逐 chunk 字符串拼接会把跨 chunk
+ *    边界的多字节字符切坏。
+ * 按 Buffer 累计真实字节数；统一走 done() 唯一 settle 出口（正常 end /
+ * 超限 / 客户端断开 close / 网络错误 error 全都只 settle 一次），保证调用方
+ * 永不挂死。
+ * 超限分支**不再调 req.destroy()**（destroy 拆掉底层 socket，
+ * 调用方下一微任务写回的 413 到不了客户端）——done(null) 即停收，未读完的
+ * 请求体由 node 在响应 flush 完成后自行收尾（destroySoon / 内核反压）。
+ *
  * @param {object} req IncomingMessage。
  * @param {number} [limit] 字节上限；超过返回 null（调用方回 413）。
  * @returns {Promise<string|null>} 请求体文本；超限/报错为 null。
  */
 function readBody(req, limit = CONFIG_BODY_LIMIT) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    let tooBig = false;
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    /** 唯一 settle 出口：任意结束路径只 resolve 一次，杜绝重复/悬挂。 */
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     req.on('data', (chunk) => {
-      body += chunk;
-      if (body.length > limit) {
-        tooBig = true;
-        try {
-          req.destroy();
-        } catch { /* 忽略 */ }
+      // chunk 是 Buffer：按字节累计（不再用字符串 length，UTF-16 计数漏洞已封）。
+      size += chunk.length;
+      if (size > limit) {
+        // **不**再调 req.destroy()——destroy 拆掉的是底层
+        // socket（Node 文档：message.destroy() 即 socket.destroy()），而路由是
+        // 在下一个微任务里才写 413（readBody().then(...)），此时连接已断，413
+        // 永远到不了客户端（只看到连接重置）。done(null) 停止收集并 settle；
+        // req.pause() 停止从内核缓冲继续拉数据（省 CPU/内存），但不拆 socket，
+        // 保证随后的 413 仍能送达；未读完的请求体由 node 在响应 flush 后自行
+        // 收尾（destroySoon）。
+        done(null);
+        req.pause();
+        return;
       }
+      // 只收合法数据；超限分支已 return，到这里的数据一律入缓冲。
+      chunks.push(chunk);
     });
-    req.on('end', () => resolve(tooBig ? null : body));
-    req.on('error', reject);
+    req.on('end', () => done(Buffer.concat(chunks).toString('utf8')));
+    req.on('close', () => done(null)); // 客户端中断也要 settle，避免悬挂
+    req.on('error', () => done(null)); // 网络错误与超限同形（统一判空回 4xx）
   });
 }
 
@@ -149,33 +187,81 @@ export function createTaskRoutes() {
     path: '/api/code-review/events',
     handler: (req, res) => {
       if (req.method !== 'GET') return json(res, 405, { error: 'method-not-allowed' });
-      res.writeHead(200, {
-        'content-type': 'text/event-stream; charset=utf-8',
-        'cache-control': 'no-cache',
-        connection: 'keep-alive',
-      });
-      const writeFrame = (payload) => {
+      // 鉴权假设（本路由挂在宿主 webServer 名下，
+      // 宿主对该路径强制同源认证（客户端 fetch 相对路径走宿主认证通道），故插件层
+      // 不再重复校验身份；此处只做「连接数上限」兜底——SSE 是长连接，每个连接
+      // 每 1s 对任务目录做一次 statSync 指纹扫描（tasksFingerprint），不限速会被
+      // 恶意页面/多标签页并发放大为目录扫描 DoS。
+      if (sseActiveConnections >= SSE_MAX_CONNECTIONS) {
+        json(res, 503, { error: 'too-many-sse-connections', limit: SSE_MAX_CONNECTIONS });
+        return;
+      }
+      sseActiveConnections += 1;
+      // 名额自增之后、close 处理器注册之前任一同步步骤抛错
+      // （writeHead / tasksFingerprint / listTasks 异常），名额将永不归还——
+      // 反复触发会把连接数钉死在上限形成 503 黑洞。包一层 try：异常路径归还
+      // 名额、清定时器，并尽力回 500（响应头未发出时），发不出则直接拆连接。
+      let timer = null;
+      // 名额是否已在异常路径归还：close 处理器与 catch 都可能递减，用标志位
+      // 保证**只递减一次**（否则「初始化异常 + 随后连接关闭」会双重递减，
+      // 计数被永久低估，上限校验形同虚设）。
+      let slotReturned = false;
+      try {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        const writeFrame = (payload) => {
+          try {
+            res.write(`data: ${JSON.stringify(payload)}\n\n`);
+          } catch { /* socket 已关 */ }
+        };
+        let last = tasksFingerprint();
+        writeFrame({ revision: last, tasks: summarize(listTasks(LIST_LIMIT)) });
+        timer = setInterval(() => {
+          const fp = tasksFingerprint();
+          if (fp !== last) {
+            last = fp;
+            writeFrame({ revision: fp, tasks: summarize(listTasks(LIST_LIMIT)) });
+          }
+        }, 1000);
+        // 断开即释放连接名额（多标签页反复开关页面时防止计数泄漏到上限）：
+        // 同时保证 clearInterval 一定执行（stopPushPoller 同款清理）。
+        req.on('close', () => {
+          clearInterval(timer);
+          // 异常路径已归还名额时不重复递减（见 slotReturned 声明处说明）。
+          if (!slotReturned && sseActiveConnections > 0) sseActiveConnections -= 1;
+        });
+      } catch (error) {
+        // 初始化异常：归还名额 + 清定时器，防名额泄漏到上限；然后尽力回 500。
+        slotReturned = true;
+        if (sseActiveConnections > 0) sseActiveConnections -= 1;
         try {
-          res.write(`data: ${JSON.stringify(payload)}\n\n`);
-        } catch { /* socket 已关 */ }
-      };
-      let last = tasksFingerprint();
-      writeFrame({ revision: last, tasks: summarize(listTasks(LIST_LIMIT)) });
-      const timer = setInterval(() => {
-        const fp = tasksFingerprint();
-        if (fp !== last) {
-          last = fp;
-          writeFrame({ revision: fp, tasks: summarize(listTasks(LIST_LIMIT)) });
+          if (timer) clearInterval(timer);
+        } catch { /* 忽略 */ }
+        try {
+          json(res, 500, { error: 'sse-init-failed', detail: String(error?.message ?? error) });
+        } catch {
+          // 响应头已发出等无法再写响应的情况：直接拆连接。
+          try {
+            res.destroy();
+          } catch { /* 忽略 */ }
         }
-      }, 1000);
-      req.on('close', () => clearInterval(timer));
+      }
     },
   });
-  // 配置写路由（2026-10-14 迭代）：设置面板的「并发评审」开关/并发广度经此写入
+  // 配置写路由（设置面板的「并发评审」开关/并发广度经此写入
   // 插件自有配置文件（plugin-config.json，运行真源）——0.2.0 宿主面板保存对第三方
-  // 插件不回传运行层（2026-10-13 实测定案），并发设置必须在保存时同步落运行真源，
+  // 插件不回传运行层（定案），并发设置必须在保存时同步落运行真源，
   // 下一次评审 getConfig 热读取立即生效。
-  // 只收白名单键（file-config sanitizePatch），值做类型校验；不发 key/不读引擎配置。
+  // 安全防线（
+  //   ① 鉴权假设：路由挂宿主 webServer 名下，受宿主同源认证保护（客户端相对路径
+  //      fetch 走宿主认证通道）。createTaskRoutes 拿不到宿主 ctx/身份（index.js 调用
+  //      处未注入），插件层无权也不做二次身份校验；
+  //   ② 请求体上限：readBody 按 Buffer 字节累计（CONFIG_BODY_LIMIT = 64KB），
+  //      超限回 413，杜绝多字节字符绕过与超量解析；
+  //   ③ 白名单：writeFileConfig 只收白名单键 + 类型校验 + 原子落盘，未知键被忽略。
   routes.push({
     kind: 'exact',
     path: '/api/code-review/config',
@@ -212,16 +298,19 @@ export function createTaskRoutes() {
 /** 会话消息摘要文本（任务完成/失败时推给发起会话）。 */
 export function completionText(task) {
   const r = task.result ?? {};
-  const head = r.ok
-    ? `✅ 代码审查任务完成（${task.id}）`
-    : r.timedOut
-      ? `⏱ 代码审查任务超时（${task.id}）`
-      : `❌ 代码审查任务失败（${task.id}）`;
+  // 头部摘要：按「成功 > 超时 > 失败」优先级取一（if/else 取代嵌套三元，项目规约）。
+  let head;
+  if (r.ok) head = `✅ 代码审查任务完成（${task.id}）`;
+  else if (r.timedOut) head = `⏱ 代码审查任务超时（${task.id}）`;
+  else head = `❌ 代码审查任务失败（${task.id}）`;
   const lines = [
     head,
     '',
     `- 仓库: ${task.repoPath ?? '(未指定)'}`,
-    r.ok ? `- 耗时: ${r.elapsedSec}s` : `- 退出码: ${r.code ?? '—'}`,
+    // elapsedSec 可能带长尾精度（引擎执行秒数非
+    // 整数）——原样拼会输出整段小数（19.384756283）；toFixed(1) 展示，与
+    // index.js buildSyncResultText / serve-entry buildResultText 同口径。
+    r.ok ? `- 耗时: ${Number(r.elapsedSec ?? 0).toFixed(1)}s` : `- 退出码: ${r.code ?? '—'}`,
     r.modelNote ? `- 模型: ${r.modelNote}` : null,
     r.ok && r.reportPath ? `- 报告: ${r.reportPath}` : null,
     '',
@@ -275,7 +364,9 @@ export async function pushCompletedTask(ctx, { channel } = {}) {
     let record;
     if (!sessionId) {
       // 无发起会话标识：不推送，只标记一次，避免每轮重复试探。
-      record = { at: new Date().toISOString(), ok: false, channel: channel?.channel ?? 'none', error: 'no-requestor' };
+      // channel 字段一律取 sender 的（入参 channel 已归一进 sender，读 sender.channel
+      // 避免与 channel?.channel 两套取法并存导致记录不一致）。
+      record = { at: new Date().toISOString(), ok: false, channel: sender.channel ?? 'none', error: 'no-requestor' };
     } else {
       try {
         const ok = await sender.prompt(sessionId, completionText(task));
@@ -284,22 +375,46 @@ export async function pushCompletedTask(ctx, { channel } = {}) {
         record = { at: new Date().toISOString(), ok: false, channel: sender.channel, error: String(error?.message ?? error) };
       }
     }
-    const before = readTask(task.id);
-    if (before) updateTask(task.id, { push: record });
-    pushed += 1;
+    // updateTask 内部是「读-改-写」原子替换：任务文件被并发清理/删除时返回 null。
+    // 不再提前 readTask 预读（少一次 IO，也缩短「读-判断-写」窗口）；
+    // pushed 按 updateTask 实际返回值计数——真正写回成功才算推进，杜绝
+    // 「任务已被清理仍虚报推送条数」的语义失真。
+    const updated = updateTask(task.id, { push: record });
+    if (updated) pushed += 1;
   }
   return pushed;
 }
 
 /** 起完成推送协程（apply 调用）；返回停止函数。tickMs 缺省 5 秒。 */
 export function startPushPoller(ctx, { tickMs = 5000 } = {}) {
-  const timer = setInterval(() => {
-    pushCompletedTask(ctx).catch((error) => {
-      ctx.logger?.warn?.(`[dsh-code-review] 完成推送轮询出错：${String(error?.message ?? error)}`);
-    });
-  }, tickMs);
+  // 重入保护（pushCompletedTask 是异步的，若上一轮
+  // 未结束（慢会话通道/网络）而 interval 又触发，会重叠执行——同一批任务可能被
+  // 并发推送两次（task.push 标记是「读-改-写」，并发下两边可能同时读到未标记）。
+  // 用 running 标志保证任意时刻至多一个协程在跑，漏掉的轮次下一轮自然补上。
+  let running = false;
+  const tick = () => {
+    if (running) return;
+    running = true;
+    pushCompletedTask(ctx)
+      .catch((error) => {
+        // 与 interval 同一条日志通道：首次补推失败也留痕，不再静默吞掉（原实现
+        // 首次补推 .catch(() => {}) 无日志，出错时难以排查）。
+        ctx.logger?.warn?.(`[dsh-code-review] 完成推送轮询出错：${String(error?.message ?? error)}`);
+      })
+      .finally(() => {
+        running = false; // 无论成败都释放标志，保证下一轮 tick 能正常发起
+      })
+      .catch(() => {
+        // 终端兜底——上面 catch 回调里的 logger.warn 与
+        // String 若自身抛错（logger 实现异常/字符串化失败），.finally 之后的
+        // 拒绝会继续往链尾传，而这条 fire-and-forget 链无人接收 → 未处理拒绝
+        // （Node 15+ 默认直接终止进程，等于把插件守护拖挂）。此空 catch 保证
+        // 任何情况链尾都闭合。
+      });
+  };
+  const timer = setInterval(tick, tickMs);
   // 启动后首次立即跑一次（把积压任务补推）。
-  pushCompletedTask(ctx).catch(() => {});
+  tick();
   return () => clearInterval(timer);
 }
 

@@ -25,7 +25,7 @@
  *  - engine_bin：引擎 codecheck 二进制路径；留空 = 插件包 bin/ 内
  *    或 PATH 中 codecheck。
  *  - first_run：首启引导标记（默认 true = 尚未引导确认）。
- *  - concurrency_enabled：并发评审开关（默认 false = 单线；2026-10-14 加）。
+ *  - concurrency_enabled：并发评审开关（默认 false = 单线； 加）。
  *  - concurrency：并发广度（默认 8，合法域 1..32；仅开关开启时生效）。
  *
  * 零敏感：不硬编码任何平台内部标识；描述文案不点名任何供应商。
@@ -33,19 +33,34 @@
  * @module dsh-code-review/plugin-config
  */
 import z from '@deepseek-ai/schemastery';
+import { CONCURRENCY_MIN, CONCURRENCY_MAX } from './config.js';
 
 /** 宿主设置页可编辑的插件配置 schema（0.2.0 configForms 表单字段真源）。 */
 export const Config = z.object({
   // 评审模型：'' / 'session' = 沿用会话模型；其他值 = 显式另选的模型标识。
   review_model: z.string().description('评审模型（留空或 session = 沿用会话模型）').volatile(),
   // 报告目录：支持 ~ 展开；空 = 默认 ~/dsh-code-review-reports。
+  // （路径类字段为自由格式字符串且「空 = 回退默认」是有意
+  // 语义，故不加 schema 层非空约束；下游校验点 = config.js normalizeConfig
+  // 的 trim + 空值回退默认。schema 层不拦内嵌
+  // NUL/换行的极端非法值——此类值会在落盘/建目录时由 writeFile/mkdir 显式
+  // 报错，属配置层防御边界，不在表单层拦截。）
   report_dir: z.string().description('评审报告目录（支持 ~，默认 ~/dsh-code-review-reports）').volatile(),
-  // 引擎路径：留空 = 插件包 bin/ 或 PATH 中的 codecheck。
+  // 引擎路径：留空 = 插件包 bin/ 或 PATH 中的 codecheck；写入值经
+  // set-config-tool 的存在性校验（见 src/set-config-tool.js execute）。
   engine_bin: z.string().description('引擎 codecheck 二进制路径（留空自动探测）').volatile(),
   // 首启引导标记。
   first_run: z.boolean().description('首次运行引导').volatile(),
-  // 并发评审开关（2026-10-14 迭代）：默认关 = 单线；开 = 并行（token 消耗增加，用户侧成本控制）。
+  // 并发评审开关：默认关 = 单线；开 = 并行（token 消耗增加，用户侧成本控制）。
   concurrency_enabled: z.boolean().description('并发评审（默认关 = 单线；开启 = 并行审查，token 消耗增加）').volatile(),
   // 并发广度：仅开关开启时生效；引擎 --concurrency 取值 1..32（默认 8）。
-  concurrency: z.number().description('并发广度（1–32，默认 8；仅开启并发评审后生效）').volatile(),
+  // schema 层补 min/max（与 config.js CONCURRENCY_MIN/MAX
+  // 及 normalizeConfig 钳制同一来源）——此前无约束 z.number() 与 description
+  // 「1–32」不符，宿主表单可接受越界值造成「面板显示值 ≠ 实际使用值」。
+  concurrency: z
+    .number()
+    .min(CONCURRENCY_MIN)
+    .max(CONCURRENCY_MAX)
+    .description('并发广度（1–32，默认 8；仅开启并发评审后生效）')
+    .volatile(),
 });

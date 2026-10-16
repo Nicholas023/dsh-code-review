@@ -17,21 +17,27 @@
  *
  * 零敏感：本文件不硬编码任何平台内部标识；评审模型选项动态来自 DSH 配置。
  */
+import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { normalizeConfig, pickOverrides, DEFAULT_CONFIG, SETTINGS_NS } from './config.js';
 import { readFileConfig } from './file-config.js';
 import { createSetConfigTool, SET_CONFIG_TOOL_NAME } from './set-config-tool.js';
 import { createSettingsSchema } from './settings-schema.js';
-import { locateEngineBin, buildReviewArgs, runEngine, probeEngineVersion, prepareEngineEnv, collectPendingPaths } from './runner.js';
-import { writeReport, repoNameOf } from './report.js';
+// 引擎定位/参数组装/执行/env 注入/待提交清单等职责已
+// 下沉到 review-exec.js，本文件只需引擎版本探测（首启引导/日志）。writeReport /
+// repoNameOf（report.js）与 resolveApiKey / isKeyMissing（credentials.js）同批移除：
+// 均未被引用、也不在文件末尾 re-export 列表。
+import { probeEngineVersion } from './runner.js';
+// buildSensitiveBlock 保留：文件末尾 re-export（低层测试/e2e 判据载体）。
 import { buildSensitiveBlock } from './sensitive-list.js';
 import { createModelSource } from './model-provider.js';
-import { resolveApiKey, isKeyMissing } from './credentials.js';
 import { executeReview } from './review-exec.js';
 import {
-  REVIEW_HOME, TASKS_ROOT,
-  enqueueTask, readTask, listTasks, ensureServe, newTaskId,
+  TASKS_ROOT, taskFileOf,
+  enqueueTask, readTask, listTasks, ensureServe,
 } from './task-book.js';
 import { createTaskRoutes, startPushPoller } from './task-api.js';
+import { buildResultText } from './result-text.js';
+import { cwdOfExec } from './exec-context.js';
 
 export const name = 'dsh-code-review';
 
@@ -46,6 +52,21 @@ export const TOOL_NAME = 'code_review';
 
 /** 后台任务状态查询工具名。 */
 export const STATUS_TOOL_NAME = 'code_review_status';
+
+/** 任务状态 → 图标映射（状态行/列表行嵌套三元表达式收敛到映射表）。
+ * 映射表对全状态生效是**有意的输出变更**——详情行
+ * 从「仅终态带 ✅/❌」变为「running/queued 也带 ⏳/🕐」，与列表行图标口径统一；
+ * 下游文案/快照断言如有依赖旧格式需相应更新。 */
+const STATUS_ICON = { done: '✅', failed: '❌', running: '⏳', queued: '🕐' };
+
+/**
+ * 状态图标（单点取图：详情行与列表行共用，fallback 统一为 🕐 ——此前详情
+ * 行对未知状态不渲染图标、列表行回退 🕐，两处口径不一致；map 已全量覆盖
+ * 四状态，这里仅防未来新增状态时两边同步拿到占位）。
+ */
+function statusIcon(status) {
+  return STATUS_ICON[status] ?? '🕐';
+}
 
 /* ═══ 一次评审的执行体（工具 execute 与 /review 命令共用） ═══ */
 
@@ -72,8 +93,8 @@ function taskFromArgs(args, cfg) {
       report_dir: cfg.report_dir,
       engine_bin: cfg.engine_bin,
       review_timeout_ms: cfg.review_timeout_ms,
-      // 并发设置必须随任务卡快照一起携带（2026-10-15 修）：review-exec 用
-      // `{ ...DEFAULT_CONFIG, ...task.config }` 还原执行配置，快照漏带即回落默认
+      // 并发设置必须随任务卡快照一起携带（review-exec 用
+      // `normalizeConfig(snap)` 还原执行配置，快照漏带即回落默认
       // false（单线）——表现为设置面板已开启并发，引擎却仍收到 --concurrency 1。
       concurrency_enabled: cfg.concurrency_enabled === true,
       concurrency: cfg.concurrency,
@@ -88,26 +109,46 @@ function taskFromArgs(args, cfg) {
  * @param {object} cfg  归一化配置。
  * @param {object} [opts] 附加元数据：{ requestor: { sessionId } }——发起会话标识，
  *                        供「完成后推送给发起会话」使用（拿不到则为空，跳过推送）。
- * @returns {Promise<{ok: boolean, taskId: string, text: string, serveAlive: boolean, syncFallback?: string}>}
- *   serve 未能拉起时回退同步执行（syncFallback 带提示）。
+ * @returns {Promise<{ok: boolean, taskId: string|null, text: string, serveAlive: boolean, syncFallback?: string}>}
+ *   taskId：后台任务 id；serve 未能拉起时回退同步执行（syncFallback 带提示），
+ *   taskId 为 null（任务从未入队，不给假 id）。
  */
 async function dispatchReview(args, cfg, opts = {}) {
   const task = taskFromArgs(args, cfg);
   if (opts.requestor) task.requestor = opts.requestor;
+  // repo_path 缺省/相对路径的归一——serve 是 detached 进程，
+  // 引擎在 serve 的 cwd（= 宿主 profile 目录）下解析相对路径必然错位。
+  // ① repo_path 省略 → 会话工作目录兜底（cwdOfExec 解析调用上下文）；
+  // ② 显式相对路径 + 取到会话工作目录 → 解析为绝对（相对路径相对「当前
+  //    目录」= 会话工作目录）；
+  // 两者都取不到 → 保持原样，serve 端显式失败提示补参（见 review-exec.js）。
+  if (opts.cwdHint) {
+    if (!task.repoPath) {
+      task.repoPath = opts.cwdHint;
+    } else if (typeof task.repoPath === 'string' && !isAbsolute(task.repoPath)) {
+      // 仅对 string 做绝对化——非 string（数字等
+      // 滑过 schema 的工具参数）交给 serve 端显式失败（review-exec 的
+      // repo_path 校验），isAbsolute 对非 string 会抛 TypeError 把退化路径
+      // 变成 execute 抛错。
+      task.repoPath = resolvePath(opts.cwdHint, task.repoPath);
+    }
+  }
   const serve = await ensureServe();
   if (!serve.alive) {
     // serve 起不来（罕见：宿主禁子进程等）→ 回退同步执行，保证能用。
     const exec = await executeReview(task);
     return {
       ok: exec.ok,
-      taskId: newTaskId(),
+      taskId: null, // 回退为同步执行，任务从未入队——不给假 id（
       serveAlive: false,
       text: buildSyncResultText(exec),
       syncFallback: `serve 未能启动（${serve.reason ?? '未知原因'}），本次已回退同步执行。`,
     };
   }
   const taskId = enqueueTask(task);
-  const taskPath = `${TASKS_ROOT}\\${taskId}.json`;
+  // taskFileOf 用 path.join + id 清洗（原字面量 `\\` 拼接在 POSIX
+  // 主机会生成畸形路径；此处仅用于展示/日志，但会误导排查）。
+  const taskPath = taskFileOf(taskId);
   return {
     ok: true,
     taskId,
@@ -131,24 +172,10 @@ async function dispatchReview(args, cfg, opts = {}) {
  * @returns {string} 会话内问题清单文本。
  */
 function buildSyncResultText(exec) {
-  const header = exec.ok
-    ? `## 代码审查完成（${exec.elapsedSec}s）\n\n以下为引擎 codecheck 的评审结果：`
-    : `## 代码审查失败（${exec.elapsedSec}s，退出码 ${exec.code}）\n\n引擎报错：`;
-  const tail = [
-    '',
-    '---',
-    exec.ok
-      ? `报告已留档：${exec.reportPath ?? '（落盘失败）'}`
-      : `（本次失败未产生有效报告${exec.reportPath ? `，但已留档记录：${exec.reportPath}` : ''}）`,
-    exec.modelNote ? `> ${exec.modelNote}` : null,
-    exec.sensitiveBlock || null,
-  ]
-    .filter(Boolean)
-    .join('\n');
-  const bodyText = exec.ok || exec.stdout.trim()
-    ? exec.stdout.trim() || '(引擎无输出)'
-    : exec.stderr.trim();
-  return `${header}\n\n${bodyText}\n${tail}`;
+  // 组装逻辑与 serve-entry 的后台完成通知完全同源，已抽到 result-text.js
+  // 唯一定义（此前两处各持一份拷贝，改一处忘另一处会漂移）。这里保留薄
+  // 包装名（同步路径的调用语义），实现直接委托共享函数。
+  return buildResultText(exec);
 }
 
 /**
@@ -180,6 +207,9 @@ function requestorOf(exec) {
   return sid ? { sessionId: String(sid) } : null;
 }
 
+// cwdOfExec 已抽到 exec-context.js（set-config-tool 的 engine_bin 相对路径
+// 解析同样需要「调用方视角」，两处共用防漂移）。使用场景注释见该模块。
+
 /**
  * 创建原生工具 code_review。
  *
@@ -197,7 +227,7 @@ export function createReviewTool(ctx, getConfig) {
       '② 找 bug（逻辑/边界/异常/并发）；③ 冗余与任务无关代码（scope creep/死代码）。',
       '【后台执行】发起后立即返回任务 id（任务卡），评审由后台 serve 异步执行：不阻塞会话、不受会话超时限制、慢模型也没关系。',
       '随后用 code_review_status 工具查状态取结果；完成后报告自动落盘留档（会话内仍可拿完整问题清单）。',
-      '参数：repo_path（仓库路径，默认当前目录）；mode（review 模式：uncommitted 工作区未提交 / branch 分支对比 / commit 指定提交；或 scan 全目录扫描）；',
+      '参数：repo_path（仓库路径，省略时尝试取会话工作目录，取不到任务失败并提示）；mode（review 模式：uncommitted 工作区未提交 / branch 分支对比 / commit 指定提交；或 scan 全目录扫描）；',
       'base_ref（branch 模式的对比基线，默认 main）；head_ref（branch 模式的目标分支）；commit（commit 模式的提交号）；',
       'focus（本次评审重点领域，一句话背景要求）；pending_paths（待提交文件相对路径数组，用于敏感文件点名，内容不送审）；',
       'exclude_paths（跳过评审的路径，如 ["engine/**"]——引擎目录等已验证的手艺可排除）。',
@@ -206,7 +236,7 @@ export function createReviewTool(ctx, getConfig) {
       type: 'object',
       additionalProperties: true,
       properties: {
-        repo_path: { type: 'string', description: '仓库路径（绝对或相对当前目录）。省略 = 当前目录。' },
+        repo_path: { type: 'string', description: '仓库路径（绝对或相对当前目录）。省略时尝试取会话工作目录；取不到则任务失败并提示显式传参（后台 serve 无「当前目录」概念）。' },
         mode: {
           type: 'string',
           enum: ['uncommitted', 'branch', 'commit', 'scan'],
@@ -242,7 +272,22 @@ export function createReviewTool(ctx, getConfig) {
       },
       render: (args, value) => [{ type: 'text', text: value?.text ?? String(value) }],
     },
-    isConcurrencySafe: () => true,
+    // 并发安全声明（此前的 `() => true` 允许宿主并发调用
+    // execute，而 execute → dispatchReview → ensureServe 是「先探活再 detached
+    // 拉起」的流程——两个并发调用可能同时判定 serve 未存活、各拉起一个
+    // serve。按评审意见回退 false：宿主对 code_review 串行化调用（工具「发起
+    // 即返回」，execute 只是毫秒级入队，串行损失可忽略），serve 拉起竞态从
+    // 源头消除。
+    // 把「串行损失可忽略」限定清楚——被串行化的是
+    // **发起动作**（入队毫秒级，无感）；并发发起的评审本身不在此并行执行，
+    // 由 serve 队列承载（排队、逐个执行），「并行审查」诉求走设置里的
+    // concurrency_enabled 开关（引擎进程内并发），不依赖工具层并行调用。
+    // serve 侧的单例竞态已另行闭合（claimServe 用
+    // openSync 'wx' 独占创建 + mtime 年龄门槛判定陈旧 + rename 原子回收；
+    // 任务锁同构）——此处保持串行化不再是为防双守护拉起，而是避免两个
+    // execute 同时 ensureServe 探活/起进程的非必要竞争；若未来要放开并发
+    // 调用，先读 task-book.ensureServe 与 serve-entry.claimServe 的锁语义。
+    isConcurrencySafe: () => false,
     presentCall: (args) => ({
       card: 'generic',
       title: `${tool}：${String(args?.repo_path ?? '.')}`,
@@ -252,9 +297,21 @@ export function createReviewTool(ctx, getConfig) {
     async execute(args, _exec) {
       const cfg = getConfig();
       const requestor = requestorOf(_exec);
-      const result = await dispatchReview(args ?? {}, cfg, requestor ? { requestor } : {});
+      // cwdHint = 宿主会话工作目录（「省略 repo_path = 当前
+      // 目录」在 GUI 宿主下的实体）；serve 是 detached 进程，不能指望它的 cwd。
+      const result = await dispatchReview(args ?? {}, cfg, {
+        ...(requestor ? { requestor } : {}),
+        cwdHint: cwdOfExec(_exec),
+      });
       const text = result.syncFallback ? `${result.text}\n\n> ${result.syncFallback}` : result.text;
-      return { ok: true, task_id: result.taskId, text };
+      // ok 透传（serve 起不来走同步回退且 executeReview 失败时，
+      // 此前恒报 ok:true，宿主会把一次失败的评审当作成功（输出 schema 的 ok 是判据）。
+      // task_id 只在成功入队/有任务号时携带——失败路径
+      // result.taskId 为 null/undefined，输出 schema 声明 string，恒带会破坏
+      // 契约（宿主校验/下游 JSON 消费）；不带键则 required 只有 ok，契约守住。
+      const payload = { ok: result.ok !== false, text };
+      if (result.taskId) payload.task_id = result.taskId;
+      return payload;
     },
   };
 }
@@ -320,7 +377,7 @@ function statusPayload(taskId) {
     let lines = [
       `## 评审任务 ${task.id}`,
       '',
-      `- 状态: **${task.status}**${task.status === 'done' ? ' ✅' : task.status === 'failed' ? ' ❌' : ''}`,
+      `- 状态: **${task.status}** ${statusIcon(task.status)}`,
       `- 仓库: ${task.repoPath ?? '(未指定)'}`,
       `- 命令: codecheck ${task.command}${task.repoPath ? ` --repo ${task.repoPath}` : ''}${(task.excludePaths || []).length ? ` ${task.excludePaths.map((p) => `--exclude ${p}`).join(' ')}` : ''}`,
       `- 创建: ${task.createdAt ?? '—'}`,
@@ -344,7 +401,7 @@ function statusPayload(taskId) {
     return { text: '还没有评审任务。用 code_review 发起一次评审吧。', tasks: [] };
   }
   const rows = tasks.map((t) => {
-    const icon = t.status === 'done' ? '✅' : t.status === 'failed' ? '❌' : t.status === 'running' ? '⏳' : '🕐';
+    const icon = statusIcon(t.status);
     return `- ${icon} \`${t.id}\` ${t.status} · ${t.command} ${t.repoPath ?? ''} · ${(t.createdAt ?? '').slice(0, 19).replace('T', ' ')}`;
   });
   return {
@@ -378,7 +435,7 @@ function welcomeOnce(ctx, cfg) {
     else process.stdout.write(`[dsh-code-review] ${msg}\n`);
   };
   log('首次启用引导 —— 智能代码审查插件已就绪。');
-  log(`评审模型：${cfg.review_model === 'session' ? '沿用会话模型（DSH 默认 DeepSeek-V41-Flash）' : cfg.review_model}（可在设置面板「智能代码审查」分区另选）。`);
+  log(`评审模型：${cfg.review_model === 'session' ? '沿用会话模型（即当前 DSH 会话所用模型）' : cfg.review_model}（可在设置面板「智能代码审查」分区另选）。`);
   log(`报告目录：${cfg.report_dir}（每次评审按 日期/仓库 落盘留档。` + '`发 GitHub 前已审过` 凭证）。');
   log('使用方法：会话里说「审一下当前改动」，或输入斜杠命令 /review 精确传参。');
   log('确认无误后，可在设置里关闭「首次启动引导」开关静默本提示。');
@@ -422,7 +479,7 @@ function registerSettings(ctx) {
 /**
  * 注册斜杠命令 /review（手动精确传参入口，与 code_review 工具共用执行体）。
  *
- * ⚠ 生命周期纪律（2026-10-12 客户端装载协议实测）：Cordis 在 apply 阶段**未注入的
+ * ⚠ 生命周期纪律（Cordis 在 apply 阶段**未注入的
  * 服务属性直接访问即抛** `cannot get property 'command' without inject`
  * （typeof 检查也拦不住——读属性本身就炸）。正确姿势：
  * 可选服务用 `ctx.inject(['command'], cb)` 动态注入，宿主提供 command 服务时
@@ -461,11 +518,18 @@ function registerCommand(ctx, getConfig) {
                 exclude_paths: exclude,
               },
               cfg,
-              // /review 由会话直接发起：argv.session 为宿主注入的会话对象（尽力取 id）。
-              argv?.session?.id ? { requestor: { sessionId: String(argv.session.id) } } : {},
+              // /review 由会话直接发起：argv.session 为宿主注入的会话对象
+              // （尽力取 id；同工具路径，repo_path 省略时
+              // 用会话工作目录兜底——宿主把 session.cwd/workspace 带上才取得到）。
+              {
+                ...(argv?.session?.id ? { requestor: { sessionId: String(argv.session.id) } } : {}),
+                cwdHint: cwdOfExec(argv?.session),
+              },
             );
             const text = result.syncFallback ? `${result.text}\n\n> ${result.syncFallback}` : result.text;
-            sctx.logger?.info?.(`[dsh-code-review] /review 已投递后台任务 ${result.taskId}。`);
+            // 同步回退路径 taskId 为 null——日志不印
+            // 假 id，明确状态下落。
+            sctx.logger?.info?.(`[dsh-code-review] /review 已投递后台任务 ${result.taskId ?? '(回退同步执行)'}。`);
             return text;
           });
         sctx
@@ -530,11 +594,13 @@ function mountTaskApi(ctx, disposers) {
  */
 export function apply(ctx, configRaw) {
   // 运行时配置真源 = 三层合并（低 → 高）：
-  //   ① 宿主 entry（configRaw，0.2.0 configForms 通道，volatile 字段为可热更新
+  //   ① settings 命名空间快照（0.1.x 通道保底，尽力读取）——**优先级最低**，
+  //      与下方展开顺序 `{ ...base, ...entry, ...file }` 一致（统一
+  //      注释口径：此前把 settings 列在 host entry 之后，与实际展开顺序矛盾）；
+  //   ② 宿主 entry（configRaw，0.2.0 configForms 通道，volatile 字段为可热更新
   //      包装对象，须**每次读取时重新解包**（调用方每次读取配置都经
   //      pickOverrides 解包，不能只在启动时解包一次）；
-  //   ② settings 命名空间快照（0.1.x 通道保底，尽力读取）；
-  //   ③ 插件自有配置文件 plugin-config.json（**运行真源**，2026-10-13 加）：
+  //   ③ 插件自有配置文件 plugin-config.json（**运行真源**）：
   //      0.2.0-rc.2 宿主「面板保存」对第三方 bundle 插件不回传 entry config（实测
   //      只写 cordis.yml/patch.yml、无 settings 快照、apply 收全默认），
   //      code_review_set_config 工具/人工编辑写入本文件，
@@ -590,13 +656,19 @@ export function apply(ctx, configRaw) {
   mountTaskApi(ctx, disposers);
 
   // 引擎可用性探测（后台异步，仅日志告知；不阻塞挂载）。
-  probeEngineVersion(getConfig()).then((v) => {
-    if (v) {
-      ctx.logger?.info?.(`[dsh-code-review] 引擎就绪：${v}`);
-    } else {
-      ctx.logger?.warn?.('[dsh-code-review] 未找到引擎 codecheck，请按设置面板说明配置 engine_bin 或放入插件包 bin/。');
-    }
-  });
+  probeEngineVersion(getConfig())
+    .then((v) => {
+      if (v) {
+        ctx.logger?.info?.(`[dsh-code-review] 引擎就绪：${v}`);
+      } else {
+        ctx.logger?.warn?.('[dsh-code-review] 未找到引擎 codecheck，请按设置面板说明配置 engine_bin 或放入插件包 bin/。');
+      }
+    })
+    .catch((error) => {
+      // 探测过程抛异常（读 engine_bin 路径、spawn 失败等）不再
+      // 产生未处理的 Promise rejection（部分宿主会打断 apply 后续逻辑/打印噪声堆栈）。
+      ctx.logger?.warn?.(`[dsh-code-review] 引擎探测失败：${String(error?.message ?? error)}`);
+    });
 
   // 返回卸载函数（尽力释放）。
   return () => {
