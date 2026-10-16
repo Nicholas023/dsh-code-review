@@ -22,6 +22,7 @@ import (
 	"github.com/alibaba/open-code-review/internal/diff"
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 // binarySniffWindow is the number of leading bytes inspected to decide
@@ -180,6 +181,7 @@ func (p *Provider) listFiles(ctx context.Context) ([]string, error) {
 // isGitRepo reports whether p.repoDir is inside a git working tree.
 func (p *Provider) isGitRepo(ctx context.Context) bool {
 	cmd := exec.CommandContext(ctx, "git", "-C", p.repoDir, "rev-parse", "--git-dir")
+	sysproc.Hide(cmd)
 	return cmd.Run() == nil
 }
 
@@ -272,6 +274,7 @@ func (p *Provider) gitLs(ctx context.Context, args ...string) ([]string, error) 
 		raw, err = p.runner.Output(ctx, p.repoDir, cmdArgs...)
 	} else {
 		cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+		sysproc.Hide(cmd)
 		cmd.Dir = p.repoDir
 		raw, err = cmd.Output()
 	}

@@ -8,8 +8,12 @@ package main
 import (
 	"context"
 	"os/exec"
+
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 func shellCommand(ctx context.Context, script string) *exec.Cmd {
-	return exec.CommandContext(ctx, "cmd", "/c", script)
+	cmd := exec.CommandContext(ctx, "cmd", "/c", script)
+	sysproc.Hide(cmd)
+	return cmd
 }

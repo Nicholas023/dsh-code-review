@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 const (
@@ -126,6 +128,7 @@ func (p *CodeSearchProvider) runGitGrep(parentCtx context.Context, cmdArgs []str
 	}
 
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	sysproc.Hide(cmd)
 	cmd.Dir = p.FileReader.RepoDir
 
 	var stdout, stderr bytes.Buffer

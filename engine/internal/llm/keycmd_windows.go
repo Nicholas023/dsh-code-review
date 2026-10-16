@@ -45,6 +45,9 @@ func newKeyCmd(ctx context.Context, cmd string) *exec.Cmd {
 	// non-empty and never looks at argv, so the doc's "leaving Args empty" is not
 	// load-bearing here -- and a one-element Args keeps Cmd.String() from panicking
 	// on Args[1:].
-	c.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd.exe /S /C "` + cmd + `"`}
+	// HideWindow must ride on the same SysProcAttr assignment: a later Hide()
+	// call would be undone by this literal, and ordering it first would be
+	// overwritten here. Credential commands are plumbing, not user-visible.
+	c.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd.exe /S /C "` + cmd + `"`, HideWindow: true}
 	return c
 }

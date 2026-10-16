@@ -54,6 +54,15 @@ const (
 	envOCRLLMModel        = "OCR_LLM_MODEL"
 	envOCRLLMAuthHeader   = "OCR_LLM_AUTH_HEADER"
 	envOCRLLMExtraHeaders = "OCR_LLM_EXTRA_HEADERS"
+	// envOCRLLMExtraBody carries vendor-specific request-body fields for the
+	// OCR env channel, as a JSON object. The config-file provider path has had
+	// an extra_body knob all along; without an env equivalent, callers that
+	// only inject OCR_LLM_* had no way to pass one. That gap is not academic:
+	// a compat endpoint that defaults to a reasoning/thinking mode (vLLM-style
+	// chat templates) cannot be told to answer directly, so every request
+	// spends its budget on hidden reasoning tokens and can cross the
+	// per-request timeout.
+	envOCRLLMExtraBody = "OCR_LLM_EXTRA_BODY"
 	// envOCRLLMProtocol overrides the resolved protocol (anthropic |
 	// openai | openai-responses). Takes priority
 	// over OCR_USE_ANTHROPIC when set.
@@ -318,7 +327,18 @@ func tryOCREnv(modelOverride string) (ResolvedEndpoint, bool, error) {
 		}
 	}
 
-	return ResolvedEndpoint{URL: url, Token: token, Model: model, Protocol: protocol, AuthHeader: authHeader, Source: "OCR environment"}, true, nil
+	// Vendor-specific request-body fields, JSON-encoded. Parsed here so a
+	// malformed value fails loudly rather than being silently dropped: the
+	// caller that sets this is usually trying to disable a default the
+	// endpoint would otherwise apply to every request.
+	var extraBody map[string]any
+	if raw := strings.TrimSpace(os.Getenv(envOCRLLMExtraBody)); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &extraBody); err != nil {
+			return ResolvedEndpoint{}, false, fmt.Errorf("OCR environment: invalid %s: %w", envOCRLLMExtraBody, err)
+		}
+	}
+
+	return ResolvedEndpoint{URL: url, Token: token, Model: model, Protocol: protocol, AuthHeader: authHeader, ExtraBody: extraBody, Source: "OCR environment"}, true, nil
 }
 
 // llmFileConfig represents the llm section in config.json.

@@ -241,6 +241,47 @@ func TestResolveEndpoint_OCREnvAuthHeader(t *testing.T) {
 	}
 }
 
+// TestResolveEndpoint_OCREnvExtraBody covers the env-channel body knob. Before
+// it existed, a caller injecting only OCR_LLM_* had no way to disable an
+// endpoint's default reasoning mode, so each request paid for hidden reasoning
+// tokens it never asked for.
+func TestResolveEndpoint_OCREnvExtraBody(t *testing.T) {
+	t.Setenv("OCR_LLM_URL", "https://api.openai.com/v1")
+	t.Setenv("OCR_LLM_TOKEN", "openai-token")
+	t.Setenv("OCR_LLM_MODEL", "gpt-4")
+	t.Setenv("OCR_LLM_EXTRA_BODY", `{"chat_template_kwargs":{"enable_thinking":false}}`)
+
+	ep, err := ResolveEndpoint(filepath.Join(t.TempDir(), "nonexistent.json"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep.ExtraBody == nil {
+		t.Fatalf("expected ExtraBody to be populated from %s", "OCR_LLM_EXTRA_BODY")
+	}
+	kwargs, ok := ep.ExtraBody["chat_template_kwargs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested chat_template_kwargs, got %#v", ep.ExtraBody)
+	}
+	if kwargs["enable_thinking"] != false {
+		t.Errorf("expected enable_thinking=false, got %#v", kwargs["enable_thinking"])
+	}
+}
+
+// A malformed value must fail the resolution instead of being dropped: the
+// caller setting it is disabling a default that otherwise applies to every
+// request, and a silent fallback would be invisible until someone wondered why
+// reviews got slow again.
+func TestResolveEndpoint_OCREnvExtraBodyInvalidJSON(t *testing.T) {
+	t.Setenv("OCR_LLM_URL", "https://api.openai.com/v1")
+	t.Setenv("OCR_LLM_TOKEN", "openai-token")
+	t.Setenv("OCR_LLM_MODEL", "gpt-4")
+	t.Setenv("OCR_LLM_EXTRA_BODY", `{"chat_template_kwargs":`)
+
+	if _, err := ResolveEndpoint(filepath.Join(t.TempDir(), "nonexistent.json")); err == nil {
+		t.Fatal("expected an error for malformed OCR_LLM_EXTRA_BODY, got nil")
+	}
+}
+
 func TestResolveEndpoint_OCREnvOpenAIIgnoresAuthHeader(t *testing.T) {
 	t.Setenv("OCR_LLM_URL", "https://api.openai.com/v1")
 	t.Setenv("OCR_LLM_TOKEN", "openai-token")

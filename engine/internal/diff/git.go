@@ -19,6 +19,7 @@ import (
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 // DiffContextLines defines the number of context lines around each changed hunk.
@@ -734,6 +735,7 @@ func (p *Provider) runGit(ctx context.Context, args ...string) (string, error) {
 		return p.runner.Run(ctx, p.repoDir, args...)
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = p.repoDir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -766,6 +768,7 @@ func (p *Provider) runGitSplit(ctx context.Context, args ...string) (string, str
 	}
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = p.repoDir
 
 	var stdout, stderr bytes.Buffer

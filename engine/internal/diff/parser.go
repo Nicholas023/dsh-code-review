@@ -15,6 +15,7 @@ import (
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 var (
@@ -164,6 +165,7 @@ func finalizeDiff(ctx context.Context, d *model.Diff, repoDir string, ref string
 			output, err = runner.Output(ctx, repoDir, args...)
 		} else {
 			cmd := exec.CommandContext(ctx, "git", args...)
+			sysproc.Hide(cmd)
 			cmd.Dir = repoDir
 			output, err = cmd.Output()
 		}

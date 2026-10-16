@@ -14,6 +14,7 @@ import (
 	"github.com/alibaba/open-code-review/internal/llm"
 	"github.com/alibaba/open-code-review/internal/model"
 	"github.com/alibaba/open-code-review/internal/session"
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 // planBlockPattern matches the "Review Plan" section in a MAIN_TASK
@@ -159,6 +160,7 @@ func detectGitBranch(ctx context.Context, repoDir string) string {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	sysproc.Hide(cmd)
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
 		return ""

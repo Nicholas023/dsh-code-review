@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 func runGitCmd(repoDir string, args ...string) ([]byte, error) {
 	fullArgs := append([]string{"-C", repoDir}, args...)
 	cmd := exec.Command("git", fullArgs...)
+	sysproc.Hide(cmd)
 	return cmd.CombinedOutput()
 }
 
@@ -21,6 +24,7 @@ func runGitCmd(repoDir string, args ...string) ([]byte, error) {
 func runGitCmdStdout(repoDir string, args ...string) ([]byte, error) {
 	fullArgs := append([]string{"-C", repoDir}, args...)
 	cmd := exec.Command("git", fullArgs...)
+	sysproc.Hide(cmd)
 	return cmd.Output()
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 	"github.com/alibaba/open-code-review/internal/pathutil"
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 // ReviewMode represents the active review mode.
@@ -129,6 +130,7 @@ func (fr *FileReader) readFromGitShow(parentCtx context.Context, path string) (s
 	}
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = fr.RepoDir
 	output, err := cmd.Output()
 	if err != nil {
@@ -223,6 +225,7 @@ func (fr *FileReader) readLinesFromGitShow(ctx context.Context, path string, sta
 	}
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = fr.RepoDir
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

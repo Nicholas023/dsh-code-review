@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 // sniffTimeout bounds a single content peek. A peek is a best-effort hint, so
@@ -132,6 +133,7 @@ func (s *sniffer) showAtRef(path string) string {
 	}
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = s.repoDir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout

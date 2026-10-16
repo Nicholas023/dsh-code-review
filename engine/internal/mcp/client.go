@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 const (
@@ -42,6 +44,7 @@ var subprocessTerminateDuration = SubprocessTerminateDuration
 // When dir is non-empty, the subprocess runs with that working directory.
 func NewClient(ctx context.Context, name, command string, args, env []string, dir, version string) (*Client, error) {
 	cmd := exec.Command(command, args...)
+	sysproc.Hide(cmd)
 	cmd.Env = append(os.Environ(), env...)
 	if dir != "" {
 		cmd.Dir = dir

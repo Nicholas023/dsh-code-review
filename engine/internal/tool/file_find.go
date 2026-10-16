@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alibaba/open-code-review/internal/diff"
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 const (
@@ -118,6 +119,7 @@ func (p *FileFindProvider) listGitFiles(parentCtx context.Context) ([]string, er
 		output, err = p.FileReader.Runner.Output(ctx, p.FileReader.RepoDir, args...)
 	} else {
 		cmd := exec.CommandContext(ctx, "git", args...)
+		sysproc.Hide(cmd)
 		cmd.Dir = p.FileReader.RepoDir
 		output, err = cmd.Output()
 	}

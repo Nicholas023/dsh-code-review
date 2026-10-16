@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 const defaultMaxConcurrent = 16
@@ -51,6 +53,7 @@ func (r *Runner) Run(ctx context.Context, repoDir string, args ...string) (strin
 	defer r.release()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = repoDir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -64,6 +67,7 @@ func (r *Runner) Output(ctx context.Context, repoDir string, args ...string) ([]
 	defer r.release()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = repoDir
 	return cmd.Output()
 }
@@ -76,6 +80,7 @@ func (r *Runner) RunSplit(ctx context.Context, repoDir string, args ...string) (
 	defer r.release()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = repoDir
 
 	var stdout, stderr bytes.Buffer
@@ -97,6 +102,7 @@ func (r *Runner) Stream(ctx context.Context, repoDir string, consume func(stdout
 	defer r.release()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	sysproc.Hide(cmd)
 	cmd.Dir = repoDir
 
 	var stderrBuf bytes.Buffer

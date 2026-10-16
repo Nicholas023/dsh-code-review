@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/alibaba/open-code-review/internal/sysproc"
 )
 
 // GitVersion holds a parsed MAJOR.MINOR.PATCH git version.
@@ -65,7 +67,9 @@ func ParseGitVersion(s string) (GitVersion, error) {
 
 func CheckGitVersion() error {
 	return checkGitVersion(func() ([]byte, error) {
-		return exec.Command("git", "--version").Output()
+		cmd := exec.Command("git", "--version")
+		sysproc.Hide(cmd)
+		return cmd.Output()
 	})
 }
 
