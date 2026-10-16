@@ -1,7 +1,7 @@
 /**
  * scripts/settings-register-repro.mjs —— 宿主等价复现：settings.register 链路冒烟。
  *
- * 背景（2026-10-12 生产实装排障）：插件激活成功后 DSH 设置页不出现
+ * 背景（生产实装排障）：插件激活成功后 DSH 设置页不出现
  * 「智能代码审查」分区。宿主设置页靠 `ctx.remote.settings.describe()`
  * 列出**所有已注册命名空间**（dsh-api-settings-controller →
  * `settings.describe({redactSecrets:true})`）。只要 `register` 真跑通，
@@ -73,15 +73,44 @@ ctx.logger = console;
 const provider = new SettingsProvider(ctx);
 
 /* ── ① register：同步 resolve 求值，抛错即 schema 不兼容/命名空间冲突 ── */
+// register 与 toJSON 复用同一个 schema 实例——原实现
+// 各自 new 一个实例，「注册的 schema」与「序列化验证的 schema」不是同一个
+// 对象（生产里宿主对 register 到的引用做 toJSON，两实例若有过期缓存/闭包
+// 状态差异会测不出来）；且 register 返回的 scope 必须可核验。
+const schema = createSettingsSchema([]);
 let scope = null;
 let registerError = null;
 try {
-  scope = provider.register(SETTINGS_NS, createSettingsSchema([]), {});
+  scope = provider.register(SETTINGS_NS, schema, {});
 } catch (error) {
   registerError = error;
 }
-console.log(`① register(${SETTINGS_NS}) : ${registerError ? `抛错 ✘ — ${String(registerError?.message ?? registerError)}` : 'OK ✔'}`);
-if (registerError) process.exit(1);
+// 宿主 register 实际返回 { get, watch, update, replace }
+// 四个方法的对象（读宿主 dsh-settings 包的 register 实现实锤），**没有 ns
+// 字段**——此前 `scope.ns === undefined || scope.ns === SETTINGS_NS` 的
+// `ns === undefined` 分支恒真，命名空间归属疑似校验实际是空转。校准为：
+// ① 判据 = 对象 + 四个方法齐全（= 注册生效、scope 可用）；
+// ② 命名空间归属宿主未在 scope 暴露，唯一真源是下面的 ② describe 命中，
+//    不再在 ① 假装能验 ns。
+// 注释不再写宿主内部包路径（dsh-settings/lib/index.js
+// 属于宿主实现细节，随宿主版本会漂移），只保留结论。
+const scopeShapeOk = scope !== null && typeof scope === 'object'
+  && ['get', 'watch', 'update', 'replace'].every((k) => typeof scope[k] === 'function');
+// 失败路径只报方法名清单，不 JSON.stringify scope（评审复查：含闭包/宿主
+// 引用的对象可能循环引用，异常时把简单报错变成二次崩溃）。
+const scopeKeys = scope && typeof scope === 'object' ? Object.keys(scope).join(',') : String(scope);
+// 原 `registerError ? … : scopeShapeOk ? … : …` 是嵌套三元，
+// 违反项目规约（src/task-api.js 明示「if/else 取代嵌套三元」）——改 if/else 链。
+let registerOutcome;
+if (registerError) {
+  registerOutcome = `抛错 ✘ — ${String(registerError?.message ?? registerError)}`;
+} else if (scopeShapeOk) {
+  registerOutcome = 'OK ✔';
+} else {
+  registerOutcome = `返回异常 ✘ — 方法缺失（keys=${scopeKeys}）`;
+}
+console.log(`① register(${SETTINGS_NS}) : ${registerOutcome}`);
+if (registerError || !scopeShapeOk) process.exit(1);
 
 /* ── ② describe：设置页分区的数据源 ── */
 const described = provider.describe({ redactSecrets: true });
@@ -89,19 +118,11 @@ const ns = described.find((d) => d.ns === SETTINGS_NS);
 console.log(`② describe 命名空间数 : ${described.length}；含 "${SETTINGS_NS}" ? ${ns ? '是 ✔' : '否 ✘'}`);
 if (ns) console.log(`   describe.ns=${ns.ns} revision=${ns.revision} value=${JSON.stringify(ns.value)} applies=${ns.applies}`);
 
-/* ── ③ schema.toJSON()：客户端渲染表单的 wire 形态 ── */
-let json = null;
-let jsonError = null;
-try {
-  json = scope ?? (await Promise.resolve());
-  // toJSON 是 schemastery schema 实例方法，先取回 schema 引用。
-} catch (error) {
-  jsonError = error;
-}
+/* ── ③ schema.toJSON()：客户端渲染表单的 wire 形态（复用 ① 的同一实例） ── */
 let toJson = null;
 let toJsonError = null;
 try {
-  toJson = createSettingsSchema([]).toJSON();
+  toJson = schema.toJSON();
 } catch (error) {
   toJsonError = error;
 }

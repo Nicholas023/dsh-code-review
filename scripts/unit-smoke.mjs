@@ -27,7 +27,7 @@ let n = 0;
 /**
  * 用例注册表。
  *
- * ⚠ 2026-10-15 修：此处原先写成 `function t(label, fn) { try { fn(); ... } }`——
+ * ⚠ 此处原先写成 `function t(label, fn) { try { fn(); ... } }`——
  * 对 **async 用例**（task-book / review-exec 两例）而言，`fn()` 返回的 Promise 既没被
  * await 也没被 catch，于是：① `✔` 与计数在用例真正跑完**之前**就打印了（"40 项通过"
  * 是虚的）；② 异步体内的异常变成 unhandledRejection 直接崩进程（实测在 task-book
@@ -115,6 +115,21 @@ t('敏感命中：.ssh/id_rsa、credentials.json、app.pem、token.txt', () => {
   assert.equal(isSensitivePath('certs/app.pem'), true);
   assert.equal(isSensitivePath('scripts/api_token.txt'), true);
 });
+t('敏感命中：token 带分隔符 + 凭据扩展名形态', () => {
+  assert.equal(isSensitivePath('refresh_token_backup.json'), true);
+  assert.equal(isSensitivePath('config/token_store.yaml'), true);
+  assert.equal(isSensitivePath('my-tokens.txt'), true);
+});
+t('敏感命中：pass 词段 + 凭据扩展名/结尾', () => {
+  assert.equal(isSensitivePath('db.pass.yml'), true);
+  assert.equal(isSensitivePath('config/pass.txt'), true);
+});
+t('敏感不命中：业务命名不误伤', () => {
+  assert.equal(isSensitivePath('token-utils/parser.js'), false);
+  assert.equal(isSensitivePath('tokenization.js'), false);
+  assert.equal(isSensitivePath('passenger.json'), false);
+  assert.equal(isSensitivePath('pass-through.yml'), false);
+});
 t('敏感不命中：.gitignore、README.md、src/main.go', () => {
   assert.equal(isSensitivePath('.gitignore'), false);
   assert.equal(isSensitivePath('README.md'), false);
@@ -130,8 +145,16 @@ t('repoNameOf：剥 .git 尾巴', () => {
   assert.equal(repoNameOf('D:/proj/dsh-code-review'), 'dsh-code-review');
   assert.equal(repoNameOf('D:/proj/repo.git'), 'repo');
 });
+t('repoNameOf：纯点/空路径回落 repo', () => {
+  assert.equal(repoNameOf('.'), 'repo');
+  assert.equal(repoNameOf('..'), 'repo');
+  assert.equal(repoNameOf(''), 'repo');
+});
 t('reportFilePath：~ 展开 + 日期分目录 + 仓库名前缀', () => {
-  const now = new Date('2026-10-12T10:30:00+08:00');
+  // 本地时间构造（new Date(y, m, d, h, m)）：任何机器时区下「本地日期」都是
+  // 若用带偏移/UTC 的字符串构造，在偏西时区会落成前一天/后一
+  // 天的本地日期，dateKey 断言随机器时区漂移。
+  const now = new Date(2026, 9, 12, 10, 30);
   const p = reportFilePath({ reportDir: '~/reports', repoPath: 'myrepo', now });
   // 绝对路径（~ 已展开到用户主目录）。
   assert.ok(p.includes('myrepo-'), p);
@@ -146,7 +169,7 @@ t('normalizeConfig：默认值全部兜底', () => {
   assert.equal(cfg.review_model, DEFAULT_CONFIG.review_model);
   assert.equal(cfg.first_run, true);
   assert.ok(cfg.review_timeout_ms > 0);
-  // 并发（2026-10-14 迭代）：默认关（单线）+ 广度默认 8。
+  // 并发（默认关（单线）+ 广度默认 8。
   assert.equal(cfg.concurrency_enabled, false);
   assert.equal(cfg.concurrency, 8);
 });
@@ -165,7 +188,10 @@ t('normalizeConfig：并发开关类型清洗 + 广度钳制 1..32', () => {
   assert.equal(normalizeConfig({ concurrency_enabled: 'yes' }).concurrency_enabled, false); // 非布尔 → 默认关
   assert.equal(normalizeConfig({ concurrency: 16 }).concurrency, 16);
   assert.equal(normalizeConfig({ concurrency: 100 }).concurrency, 32);   // 上限
-  assert.equal(normalizeConfig({ concurrency: 0 }).concurrency, 1);      // 下限
+  // 口径统一为「≤0 不采纳、回退默认」——
+  // 旧断言期待 0 被钳到 1，与 file-config.sanitizePatch 的「非正值剔除」分叉；
+  // 同输入两个入口两个结果已裁决为回退默认（面板/工具写入 0 都读回默认 8）。
+  assert.equal(normalizeConfig({ concurrency: 0 }).concurrency, 8);      // ≤0 → 默认
   assert.equal(normalizeConfig({ concurrency: 'x' }).concurrency, 8);    // 非数 → 默认
 });
 
@@ -203,22 +229,30 @@ t('createSettingsSchema(带模型列表) 接收选项（步骤5 动态选项位�
 });
 
 /* ---------- 7. model-provider（步骤5） ---------- */
-t('createModelSource()：session 恒解析为 DeepSeek 官方端点', () => {
-  const src = createModelSource(undefined, {});
+t('createModelSource()：session 无会话上下文 → 表首回退，绝不落官方付费端点（红线）', () => {
+  const src = createModelSource(undefined);
   const ep = src.resolveProvider(SESSION_MODEL);
-  assert.ok(ep, '应解析出端点');
-  assert.equal(ep.url, DEEPSEEK_OFFICIAL_DEFAULT.url);
-  assert.equal(ep.model, 'deepseek-flash');
-  assert.equal(ep.protocol, 'openai');
-  assert.equal(ep.keyEnv, 'DEEPSEEK_API_KEY');
-  assert.ok(['fallback', 'session', 'config-deepseek'].includes(ep.resolvedFrom), `resolvedFrom=${ep.resolvedFrom}`);
+  assert.ok(ep, '本机有用户配置路由，应解析出端点');
+  // 红线：官方付费兜底已整体移除——session 拿不到会话模型时
+  // 走 routes 表首（用户配置优先），任何路径都不得隐式落到官方付费端点。
+  assert.notEqual(ep.url, DEEPSEEK_OFFICIAL_DEFAULT.url, '不得回退官方付费端点');
+  assert.ok(ep.url && ep.model && ep.protocol, '回退端点/模型/协议必非空');
+  assert.equal(ep.resolvedFrom, 'fallback', 'session 兜底应标 fallback');
 });
-t('createModelSource()：未知模型回退官方默认（选中模型失效语义）', () => {
-  const src = createModelSource(undefined, {});
+t('createModelSource()：未知模型回退表首，路由表空返回 null（官方兜底已禁用）', () => {
+  const src = createModelSource(undefined);
   const ep = src.resolveProvider('no-such-model-xyz');
-  assert.ok(ep, '未知模型不应返回 null');
-  assert.equal(ep.model, 'deepseek-flash');
-  assert.equal(ep.url, DEEPSEEK_OFFICIAL_DEFAULT.url);
+  assert.ok(ep, '本机路由表非空，未知模型应回退表首（非 null）');
+  // + 红线：回退优先第一条有 url 的既有路由（保持用户
+  // 配置的端点/凭证/协议语义）；**路由表全空返回 null**（旧行为=回官方付费
+  // 默认，已移除）——由调用方（review-exec）失败并提示配置，绝不隐式花钱。
+  assert.equal(ep.resolvedFrom, 'fallback-from-explicit', '显式选择不存在 → fallback-from-explicit');
+  assert.ok(ep.url && ep.model, '回退端点/模型必非空');
+  assert.ok(!String(ep.url).includes('api.deepseek.com'), '回退端点不得是官方付费端点');
+  assert.ok(
+    ['config-deepseek', 'config-alternate'].includes(ep.source),
+    `回退 source 应来自既有用户配置路由，实际 ${ep.source}`
+  );
 });
 t('createModelSource()：listCandidates 首项为 session', () => {
   const src = createModelSource(undefined, {});
@@ -230,38 +264,42 @@ t('createModelSource()：listCandidates 首项为 session', () => {
 
 /* ---------- 8. credentials（步骤5，纯函数样例） ---------- */
 t('parseCredentialsText：refs 段与顶层键均可提取', () => {
-  const text = 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc123\n  THIRD_API_KEY: sk-other\n';
-  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'sk-abc123');
-  assert.equal(parseCredentialsText(text, 'THIRD_API_KEY'), 'sk-other');
+  const text = 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: key-abc123\n  THIRD_API_KEY: other-key\n';
+  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'key-abc123');
+  assert.equal(parseCredentialsText(text, 'THIRD_API_KEY'), 'other-key');
 });
 t('parseCredentialsText：深缩进（records 段）不误读', () => {
-  const text = 'records:\n  client-connection/session\n    payload:\n      secret: inner-1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n';
-  // 6 空格缩进的 secret 不应被当成引用名命中。
-  assert.equal(parseCredentialsText(text, 'secret'), '');
-  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'sk-abc');
+  // 夹具值去掉 sk- 前缀——仓库公开后 sk- 形态字串
+  // 会被外部敏感扫描误报成真实密钥形态（零敏感红线连夹具也不放过）。
+  const text = 'records:\n  client-connection/session\n    payload:\n      secret: inner-1\nrefs:\n  DEEPSEEK_API_KEY: key-abc\n';
+  // 6 空格缩进的 secret 不应被当成引用名命中（键不存在 → null，与显式空值区分）。
+  assert.equal(parseCredentialsText(text, 'secret'), null);
+  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), 'key-abc');
 });
 t('parseCredentialsText：= 与引号变体', () => {
-  const text = 'KEY_WITH_EQ=sk-x1\nKEY_QUOTED: "sk-x2"\n';
-  assert.equal(parseCredentialsText(text, 'KEY_WITH_EQ'), 'sk-x1');
-  assert.equal(parseCredentialsText(text, 'KEY_QUOTED'), 'sk-x2');
+  const text = 'KEY_WITH_EQ=key-x1\nKEY_QUOTED: "key-x2"\n';
+  assert.equal(parseCredentialsText(text, 'KEY_WITH_EQ'), 'key-x1');
+  assert.equal(parseCredentialsText(text, 'KEY_QUOTED'), 'key-x2');
 });
-t('parseCredentialsText：缺名安全空串', () => {
-  const text = 'OTHER: xyz\n';
-  assert.equal(parseCredentialsText(text, 'DEEPSEEK_API_KEY'), '');
+t('parseCredentialsText：键不存在 → null；显式空值 → 空串（两者可区分）', () => {
+  assert.equal(parseCredentialsText('OTHER: xyz\n', 'DEEPSEEK_API_KEY'), null);
+  assert.equal(parseCredentialsText('DEEPSEEK_API_KEY: ""\n', 'DEEPSEEK_API_KEY'), '');
 });
 
 /* ---------- 9. prepareEngineEnv（步骤5） ---------- */
 t('prepareEngineEnv：端点和 key 齐备时注入 5 个 OCR_LLM_* 键', () => {
   const prep = prepareEngineEnv({
     endpoint: { url: 'https://api.deepseek.com', protocol: 'openai', model: 'deepseek-flash', keyEnv: 'DEEPSEEK_API_KEY', providerLabel: 'DeepSeek 官方' },
-    key: 'sk-test',
+    key: 'key-test',
   });
   assert.ok(prep.injected);
   assert.equal(prep.env.OCR_LLM_URL, 'https://api.deepseek.com');
-  assert.equal(prep.env.OCR_LLM_TOKEN, 'sk-test');
+  assert.equal(prep.env.OCR_LLM_TOKEN, 'key-test');
   assert.equal(prep.env.OCR_LLM_MODEL, 'deepseek-flash');
   assert.equal(prep.env.OCR_LLM_PROTOCOL, 'openai');
-  assert.ok(prep.env.OCR_LLM_TIMEOUT > '0');
+  // 数值断言——原 `> '0'` 是字符串首字符比较，
+  // '9' > '0' 也通过（'90'、'300' 这类值全部误判），测不出「秒数为正」。
+  assert.ok(Number(prep.env.OCR_LLM_TIMEOUT) > 0, `OCR_LLM_TIMEOUT=${prep.env.OCR_LLM_TIMEOUT}`);
   assert.ok(prep.note.includes('DeepSeek 官方'));
 });
 t('prepareEngineEnv：缺 key 不注入（引擎回退自身配置）', () => {
@@ -303,11 +341,11 @@ t('collectPendingPaths：空路径/非 git 目录 → []（点名层静默跳过
   assert.deepEqual(collectPendingPaths(join(tmpdir(), 'no-such-git-repo-xyz')), []);
 });
 
-/* ---------- 7. 后台任务化（2026-10-13）新增 ---------- */
+/* ---------- 7. 后台任务化新增 ---------- */
 t('buildReviewArgs：excludePaths → 单个 --exclude 逗号分隔（引擎 --exclude 是单值多模式，重复传只有最后一个生效）', () => {
   const args = buildReviewArgs({ command: 'scan', repoPath: '/repo', excludePaths: ['engine/**', 'dist/**'] });
   // 只允许出现一个 --exclude：引擎侧 --exclude 是单值、逗号分隔多模式语义，不是可重复
-  // flag；逐个 push 会让只有最后一个生效（2026-10-15 实测：5 个独立 --exclude → 待审 227
+  // flag；逐个 push 会让只有最后一个生效（5 个独立 --exclude → 待审 227
   // 个文件，合并成逗号分隔 → 待审 36 个）。
   assert.equal(args.filter((a) => a === '--exclude').length, 1);
   const i = args.indexOf('--exclude');
@@ -353,14 +391,16 @@ t('task-book：入队/读/更新/列表 状态机 + 原子落盘（隔离目录�
     assert.equal(done.status, 'done');
     assert.equal(done.result.ok, true);
     // listTasks：倒序（后创建的排前面）且能读出状态。
-    // ⚠ 同一秒内创建的两个任务文件名时间戳前缀相同，字典序由 4 位随机后缀
-    //   决定、先后无保证（task-api-smoke 已踩同一坑）——这里等 1.05s 让 id2
-    //   的时间戳一定大于 id，倒序断言才稳定。
-    await new Promise((r) => setTimeout(r, 1050));
+    // 删除原 1.05s 睡眠——睡眠赌「跨秒」本质是
+    // 碰运气（边界差几十 ms 就同秒，倒序断言反例），且每次自检白等一秒多；
+    // task-api-smoke 已踩同一坑。改为断言排序性质本身：id 按字典序降序
+    // （id 以创建时间戳前缀开头），同秒创建时先后无保证但性质恒成立——
+    // 「latest first」排序函数是否正确的可观测证据不变，且不再依赖时钟。
     const id2 = tb.enqueueTask({ repoPath: '/r2' });
     const list = tb.listTasks(10);
-    assert.equal(list[0].id, id2);
-    assert.equal(list[1].id, id);
+    const ids = list.map((t) => t.id);
+    assert.deepEqual([...ids].sort().reverse(), ids, `列表应按 id 降序：${ids.join(',')}`);
+    assert.ok(ids.includes(id2) && ids.includes(id), '两个任务都在列表内');
   } finally {
     process.env.DSH_REVIEW_HOME = prev;
     rmSync(home, { recursive: true, force: true });
@@ -368,12 +408,47 @@ t('task-book：入队/读/更新/列表 状态机 + 原子落盘（隔离目录�
 });
 
 t('review-exec：模块可加载，executeReview 为异步执行函数（后台 serve 与工具共用同一执行体）', async () => {
-  const { executeReview } = await import(new URL('../src/review-exec.js', import.meta.url).href);
-  assert.equal(typeof executeReview, 'function');
-  const p = executeReview({ repoPath: '/nonexistent-repo-xyz', config: { review_timeout_ms: 30_000 } });
-  assert.ok(p instanceof Promise);
-  // 引擎在包内 bin/ 时此任务会真实启动引擎（不等待完成）；仅验证函数契约。
-  p.catch(() => {});
+  // 报告目录隔离到临时目录：执行体失败路径也可能写报告，不能碰用户默认目录。
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const reportTmp = mkdtempSync(join(tmpdir(), 'dcr-review-exec-'));
+  try {
+    const { executeReview } = await import(new URL('../src/review-exec.js', import.meta.url).href);
+    assert.equal(typeof executeReview, 'function');
+    const p = executeReview({ repoPath: '/nonexistent-repo-xyz', config: { review_timeout_ms: 30_000, report_dir: reportTmp } });
+    assert.ok(p instanceof Promise);
+    // executeReview 从不 reject（执行体内错误全部
+    // 归一化为 {ok:false,...} 结果对象）——原先 `await p.catch(() => {})` 的
+    // catch 是死代码，结果什么都没验。改为断言结果对象 shape：无论 ok 与否
+    // 都必须带 ok/code/elapsedSec 等固定字段（仓库不存在 → ok 应为 false，
+    // 但不断言具体值——本用例只验函数契约，行为验证归 engine-e2e）。
+    const res = await p.catch((error) => ({ ok: false, rejected: String(error) }));
+    assert.ok(res && typeof res === 'object', 'executeReview 应返回结果对象');
+    assert.equal(typeof res.ok, 'boolean', '结果对象必须带布尔 ok');
+    // 结果契约补全断言——code/elapsedSec/timedOut
+    // 是 executeReview 固定返回字段（成功/失败/超时路径都有），缺字段 = 契约
+    // 漂移立刻暴露（此前只断言 ok，其余字段可静默丢失）。
+    // code 只断言「字段存在且为数值或 null」——
+    // executeReview 的失败路径（缺 repo_path/引擎未定位/spawn 错/超时）契约
+    // 都是 code: null，只有引擎真跑出才给数值；unit 是「确定性模块自检」，
+    // 不该隐式依赖本机是否有编译好的引擎二进制（新克隆 / CI 未构建引擎时
+    // locateEngineBin 返回 null，code 恒 null）。
+    assert.ok('code' in res && (res.code === null || typeof res.code === 'number'), '结果对象必须带 code 字段（数值或 null）');
+    assert.equal(typeof res.elapsedSec, 'number', '结果对象必须带数值 elapsedSec（秒）');
+    assert.equal(typeof res.timedOut, 'boolean', '结果对象必须带布尔 timedOut');
+    // repoPath 空 → 显式失败（不带引擎裸跑 cwd——
+    // detached serve 的 cwd 是宿主 profile 目录，裸跑必报伪失败「not a git
+    // repository」；显式失败的错误信息引导补参）。
+    const pNoRepo = executeReview({ repoPath: '', config: {} });
+    const resNoRepo = await pNoRepo.catch((error) => ({ ok: false, rejected: String(error) }));
+    assert.equal(resNoRepo.ok, false, '空 repo_path 必须显式失败');
+    assert.ok(
+      typeof resNoRepo.stderr === 'string' && resNoRepo.stderr.includes('repo_path'),
+      '失败信息必须含 repo_path 引导（stderr 实读）'
+    );
+  } finally {
+    rmSync(reportTmp, { recursive: true, force: true });
+  }
 });
 
 await runAll();

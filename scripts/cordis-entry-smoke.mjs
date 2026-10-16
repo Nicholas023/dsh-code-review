@@ -4,13 +4,16 @@
  * 开发期验证「插件挂载成功、工具可见」（步骤 4 判据的开发侧等价物）：
  *   1. src/index.js 可导入，导出 apply（函数）与 name/inject；
  *   2. inject 声明含 'tools'（Cordis 服务注入，缺失即启用失败）与 'settings'；
- *   3. 用最小 ctx 垫片调用 apply：不抛异常、恰好注册 code_review 工具、
+ *   3. 用最小 ctx 垫片调用 apply：不抛异常、恰好注册 code_review /
+ *      code_review_status / code_review_set_config 三个工具（后台任务形态 +
+ *      配置入口，与 dsh-plugin.json 的 x-tools 声明对齐）、
  *      ctx.effect 的清理函数可执行不抛；
  *   4. package.json 双形态声明与随包文件齐备（main / exports / dsh.bundle.patch /
  *      files 含 cordis.patch.yml、dsh-plugin.json、std-facet.js、client.js）；
  *   5. cordis.patch.yml 结构有效（顶层 insert，id/name 均为 dsh-code-review）；
- *   6. 附件模块（config/settings-schema/runner/report/sensitive-list）可导入，
- *      工具参数 schema 必填字段就绪。
+ *   6. 附件模块（config/settings-schema/plugin-config/runner/report/sensitive-list）
+ *      可导入，工具参数 schema 必填字段就绪；src/index.js 导出 0.2.0 Config
+ *      schema（configForms 表单真源，键与 settings-schema 对齐）。
  *
  * 隔离：apply 不做任何外部写（不读真实设置文件、不写盘），probeEngineVersion
  * 仅尝试 spawn codecheck（不存在即快速失败进 warn 日志），因此无需 DSH_HOME
@@ -18,10 +21,14 @@
  */
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
+// 仓库根用 dirname 二次取父目录——原
+// `join(fileURLToPath(import.meta.url), '..', '..')` 把文件路径当目录段参与 `..`
+// 归一化，结果恰好等于仓库根，但依赖「文件名可以被 .. 吃掉」的巧合；
+// 文件改名/目录调整时静默错位。dirname 语义直白：文件 → 所在目录 → 仓库根。
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 let failures = 0;
 function check(label, ok, detail = '') {
@@ -72,12 +79,13 @@ for (const m of ['config', 'settings-schema', 'plugin-config', 'runner', 'report
 
 /* ---------- 2.5 0.2.0 设置契约：插件导出 Config（configForms 表单真源） ----------
  * 宿主 describe 按 entry 读 entry.fiber.runtime.Config 投影表单；
- * 缺 Config 导出 → describe 无本插件行 → 客户端表单 status=unavailable 不可写。 */
+ * 缺 Config 导出 → describe 无本插件行 → 客户端表单 status=unavailable 不可写。
+ * 直接复用外层 mod（ESM 模块缓存本就命中同一实例），
+ * 去掉重复的动态 import 同一路径。 */
 {
   let ok = false;
   let detail = '缺 Config 导出';
   try {
-    const mod = await import(new URL('../src/index.js', import.meta.url).href);
     if (mod.Config && typeof mod.Config.toJSON === 'function') {
       const serialized = mod.Config.toJSON();
       const root = serialized?.refs?.[serialized?.uid];
@@ -180,7 +188,10 @@ if (registeredTools.length >= 1) {
   const tool = registeredTools.find((t) => t?.name === 'code_review');
   const statusTool = registeredTools.find((t) => t?.name === 'code_review_status');
   check('code_review 工具有 name', tool?.name === 'code_review');
-  check('code_review 工具有 description（微调模型可见）', typeof tool?.description === 'string' && tool.description.length > 50);
+  // description 判据从「长度 > 50 魔法数」放宽为
+  // 「非空字符串」——长度阈值与文案长度强耦合，纯属拍脑袋；非空即可证明
+  // 描述已就位，文案质量应是人工 review 的事而不是冒烟断言。
+  check('code_review 工具有 description（微调模型可见）', typeof tool?.description === 'string' && tool.description.trim().length > 0);
   check(
     'code_review 工具有 parameters JSON Schema（必填项合理）',
     typeof tool?.parameters?.type === 'string' && typeof tool?.parameters?.properties === 'object'

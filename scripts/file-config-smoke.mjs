@@ -23,7 +23,9 @@ const {
   sanitizePatch,
   PLUGIN_CONFIG_FILE,
 } = await import('../src/file-config.js');
-const { createSetConfigTool, SET_CONFIG_TOOL_NAME } = await import('../src/set-config-tool.js');
+const { createSetConfigTool } = await import('../src/set-config-tool.js');
+// SET_CONFIG_TOOL_NAME 死导入已移除（本脚本只用工厂，不
+// 需要工具名常量；常量在 src/set-config-tool.js 有定义即足够）。
 
 let passed = 0;
 function ok(name, cond, detail = '') {
@@ -32,6 +34,10 @@ function ok(name, cond, detail = '') {
   console.log(`  ✓ ${name}`);
 }
 
+// 测试体套 try/finally：任一条断言失败（assert 抛错）或
+// 文件读取/JSON.parse 抛异常时，finally 同样执行清理——此前 rmSync 只在全部
+// 断言通过后执行，失败路径会泄漏临时目录。
+try {
 // ① 文件缺失 → {}
 ok('缺失文件读空', JSON.stringify(readFileConfig()) === '{}');
 
@@ -58,26 +64,43 @@ ok('sanitize 类型拒绝', JSON.stringify(sanitizePatch({ first_run: 'yes', rev
 
 // ⑥ 损坏 JSON → 读 {}
 writeFileConfig({ report_dir: '~/x' });
-const { writeFileSync, renameSync } = await import('node:fs');
+// renameSync 死解构已删（本脚本只 import 实际使用的
+// writeFileSync；改名由 src/file-config.js 内部负责，这里造坏文件不需要）。
+const { writeFileSync } = await import('node:fs');
 writeFileSync(PLUGIN_CONFIG_FILE, '{ 坏 JSON !!', 'utf8');
 ok('损坏 JSON 读空', JSON.stringify(readFileConfig()) === '{}');
 
 // ⑦ set-config-tool：只查（无参数）→ 不写；带参 → 写并取回生效值
-const cfg = readFileConfig(); // 此时损坏文件 → {}
+// 断言由宽松文本匹配改为结构化事实——
+//   a) 查询模式不写盘：注入的 writeFileConfig 打计数，查询后必须 0 次调用；
+//   b) 写入模式恰好 1 次写盘且文件回读即为新值（持久化真实生效）。
+let writeCalls = 0;
+// stub 必须保持与生产 writeFileConfig 相同的**同步**
+// 契约——async 包装会把写盘抛错变成 rejected promise 而非同步 throw：
+// set-config-tool 的同步 try/catch 接不住，wrote 仍置 true（报告 ok:true 实际
+// 没写），失败路径被静默击穿；同步 stub 才能测到真实失败路径。
+const countingWrite = (...args) => { writeCalls += 1; return writeFileConfig(...args); };
 const tool = createSetConfigTool({ logger: { warn: () => {} } }, () => ({ review_model: 'session', report_dir: '~/d', engine_bin: '' }), {
-  writeFileConfig,
+  writeFileConfig: countingWrite,
   PLUGIN_CONFIG_FILE,
 });
 const query = await tool.execute({}, {});
-ok('查询模式 ok', query.ok === true && query.text.includes('配置文件'));
+// 文案以「- 评审模型：`...`」结构行列出当前生效值（set-config-tool 输出契约）。
+ok('查询模式 ok 且列出生效配置', query.ok === true && typeof query.text === 'string' && query.text.includes('- 评审模型：'), query.ok ? String(query.text.length) + ' 字符' : '');
+ok('查询模式不写盘（无副作用）', writeCalls === 0, `writeCalls=${writeCalls}`);
 // 重新生成工具（getConfig stub 反映写后重读值）
 const tool2 = createSetConfigTool({ logger: { warn: () => {} } }, () => ({ review_model: 'test-model-b', report_dir: '~/d', engine_bin: '' }), {
-  writeFileConfig,
+  writeFileConfig: countingWrite,
   PLUGIN_CONFIG_FILE,
 });
 const writeRes = await tool2.execute({ review_model: 'test-model-b' }, {});
-ok('写入模式返回生效值', writeRes.text.includes('test-model-b'));
-ok('写入后文件存在', readFileConfig().review_model === 'test-model-b');
+ok('写入模式返回生效值', typeof writeRes.text === 'string' && writeRes.text.includes('test-model-b'));
+ok('写入模式恰好一次落盘', writeCalls === 1, `writeCalls=${writeCalls}`);
+ok('写入后文件回读即新值（持久化生效）', readFileConfig().review_model === 'test-model-b');
+} finally {
+  // 环境复原 + 临时目录清理（无论成败）
+  delete process.env.DSH_REVIEW_HOME;
+  rmSync(tmpRoot, { recursive: true, force: true });
+}
 
 console.log(`\nfile-config smoke 全过：${passed} 项。`);
-rmSync(tmpRoot, { recursive: true, force: true });
