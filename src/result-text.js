@@ -25,7 +25,10 @@
 export function buildResultText(exec) {
   // elapsedSec 契约为 number（秒，失败路径为 0）；Number() 兜底历史任务簿
   // 里的 string 残留（早期版本可能落过字符串），toFixed(1) 统一展示精度。
-  const elapsedText = `${Number(exec.elapsedSec ?? 0).toFixed(1)}s`;
+  // 非有限值（NaN/Infinity：损坏的旧任务记录等）一律回退 0，避免渲染出
+  // 「NaNs」这类脏文本（Number('abc') → NaN，toFixed 会产出 'NaN'）。
+  const elapsedSec = Number(exec.elapsedSec ?? 0);
+  const elapsedText = `${(Number.isFinite(elapsedSec) ? elapsedSec : 0).toFixed(1)}s`;
   // 退出码可能是 null（catch / 参数非法 / 引擎缺失 / spawn 错误 / 超时等路径），
   // 直接插值会渲染成「退出码 null」。缺码时整段省略（不提退出码）。
   const codeText = (exec.code !== null && exec.code !== undefined) ? `，退出码 ${exec.code}` : '';
