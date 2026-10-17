@@ -477,36 +477,84 @@ function registerSettings(ctx) {
 /* ═══ 斜杠命令 /review ═══ */
 
 /**
- * 注册斜杠命令 /review（手动精确传参入口，与 code_review 工具共用执行体）。
+ * 解析 /review 的裸参数（宿主 commands 服务只把命令名之后的原文作为
+ * `invocation.rawInput` 交给处理器——0.2.x 已无链式 option/argument 描述符，
+ * 命令自己拥有专属语法）。支持 `--key value` / `--key=value` / `-m value`
+ * 与短别名（-m/-r/-b/-c/-f）；未知 token 忽略（尽力而为，不因一个陌生词失败）。
  *
- * ⚠ 生命周期纪律（Cordis 在 apply 阶段**未注入的
- * 服务属性直接访问即抛** `cannot get property 'command' without inject`
- * （typeof 检查也拦不住——读属性本身就炸）。正确姿势：
- * 可选服务用 `ctx.inject(['command'], cb)` 动态注入，宿主提供 command 服务时
- * 才注册；不写静态 `inject` 数组（那是「必需的才用」），缺服务不阻塞插件激活，
- * 工具 code_review 仍为主力入口。
+ * @param {string} raw 命令名之后的原文。
+ * @returns {{mode?:string, repo?:string, base?:string, head?:string, commit?:string, focus?:string, exclude?:string[]}}
+ */
+function parseReviewInput(raw) {
+  const argv = {};
+  const tokens = String(raw ?? '').trim().split(/\s+/).filter(Boolean);
+  const alias = { '-m': 'mode', '-r': 'repo', '-b': 'base', '-c': 'commit', '-f': 'focus' };
+  const known = new Set(['mode', 'repo', 'base', 'head', 'commit', 'focus', 'exclude']);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    let key;
+    let value = null;
+    const eq = token.indexOf('=');
+    if (token.startsWith('--')) {
+      key = eq >= 0 ? token.slice(2, eq) : token.slice(2);
+      if (eq >= 0) value = token.slice(eq + 1);
+    } else if (Object.prototype.hasOwnProperty.call(alias, token)) {
+      key = alias[token];
+    } else {
+      continue; // 裸值 / 未知 token：忽略
+    }
+    if (!known.has(key)) continue;
+    if (value === null) {
+      const next = tokens[i + 1];
+      if (next !== undefined && !next.startsWith('-')) {
+        value = next;
+        i += 1;
+      } else {
+        value = '';
+      }
+    }
+    if (key === 'exclude') {
+      argv.exclude = String(value).split(',').map((s) => s.trim()).filter(Boolean);
+    } else {
+      argv[key] = value;
+    }
+  }
+  return argv;
+}
+
+/**
+ * 注册斜杠命令 /review 与 /review-status（手动精确传参入口，与 code_review 工具共用执行体）。
+ *
+ * ⚠ 生命周期纪律：命令服务是**可选增强**（无 UI 的宿主不提供），不能写进静态
+ * `inject`（那是「必需才用」）。用 `ctx.inject(['commands'], cb)` 动态注入——宿主提供
+ * commands 服务时才注册，缺服务不阻塞插件激活，工具 code_review 仍为主力入口。
+ * 注册返回的卸载函数统一收集进 disposers，apply 卸载时释放。
+ *
+ * ⚠ 0.2.x 命令 API：`ctx.commands.register(definition)`（**复数** commands 服务，
+ * 处理器收 `{ rawInput, agent, ... }` 并返回 `{ kind: 'success'|'error', text }`）。
+ * 此前用的单数 `command` 服务 + 链式 `.command().option().argument().action()` 在
+ * 0.2.x 任一版本都不存在（ctx.inject('command') 永不就绪）→ /review 从未注册成功。
+ *
+ * 会话工作目录与发起会话取自 `invocation.agent.session`（0.2.x 命令处理器不再注入
+ * argv.session）：agent.session.id 供「完成后推回发起会话」，agent.session.header.cwd
+ * 供 repo_path 省略时兜底。
  *
  * @param {object} ctx       Cordis 上下文。
  * @param {Function} getConfig 实时配置读取函数。
+ * @param {Function[]} disposers 卸载函数收集数组。
  */
-function registerCommand(ctx, getConfig) {
+function registerCommand(ctx, getConfig, disposers) {
   try {
-    ctx.inject(['command'], (sctx) => {
+    ctx.inject(['commands'], (sctx) => {
       try {
-        sctx
-          .command('review', '智能代码审查：对仓库 diff/扫描做评审（安全/找bug/冗余三视角）。后台执行——发起即返回任务 id，不阻塞；结果用 /review-status 查。')
-          .option('mode, -m <mode>', '评审模式：uncommitted（默认）/ branch / commit / scan', { fallback: 'uncommitted' })
-          .option('repo, -r <repo>', '仓库路径（默认当前目录）')
-          .option('base, -b <base>', 'branch 模式的对比基线（默认 main）', { fallback: 'main' })
-          .option('head <head>', 'branch 模式的目标分支')
-          .option('commit, -c <commit>', 'commit 模式的提交号')
-          .option('focus, -f <focus>', '本次评审重点领域（一句话背景）')
-          .option('exclude <exclude>', '跳过评审的路径模式（--exclude 语义；多个用逗号分隔，如 engine/**,dist/**）')
-          .action(async (argv) => {
+        disposers.push(sctx.commands.register({
+          definitionId: 'dsh-code-review/review',
+          name: 'review',
+          description: '智能代码审查：对仓库 diff/扫描做评审（安全/找bug/冗余三视角）。后台执行——发起即返回任务 id，不阻塞；结果用 /review-status 查。',
+          input: { hint: '[-m uncommitted|branch|commit|scan] [-r repo] [-b base] [--head head] [-c commit] [-f focus] [--exclude a,b]' },
+          handler: async ({ rawInput, agent }) => {
+            const argv = parseReviewInput(rawInput);
             const cfg = getConfig();
-            const exclude = typeof argv.exclude === 'string' && argv.exclude.trim()
-              ? argv.exclude.split(',').map((s) => s.trim()).filter(Boolean)
-              : [];
             const result = await dispatchReview(
               {
                 mode: argv.mode,
@@ -515,36 +563,37 @@ function registerCommand(ctx, getConfig) {
                 head_ref: argv.head,
                 commit: argv.commit,
                 focus: argv.focus,
-                exclude_paths: exclude,
+                exclude_paths: argv.exclude,
               },
               cfg,
-              // /review 由会话直接发起：argv.session 为宿主注入的会话对象
-              // （尽力取 id；同工具路径，repo_path 省略时
-              // 用会话工作目录兜底——宿主把 session.cwd/workspace 带上才取得到）。
               {
-                ...(argv?.session?.id ? { requestor: { sessionId: String(argv.session.id) } } : {}),
-                cwdHint: cwdOfExec(argv?.session),
+                ...(agent?.session?.id ? { requestor: { sessionId: String(agent.session.id) } } : {}),
+                cwdHint: agent?.session?.header?.cwd,
               },
             );
             const text = result.syncFallback ? `${result.text}\n\n> ${result.syncFallback}` : result.text;
-            // 同步回退路径 taskId 为 null——日志不印
-            // 假 id，明确状态下落。
+            // 同步回退路径 taskId 为 null——日志不印假 id，明确状态下落。
             sctx.logger?.info?.(`[dsh-code-review] /review 已投递后台任务 ${result.taskId ?? '(回退同步执行)'}。`);
-            return text;
-          });
-        sctx
-          .command('review-status', '查询后台评审任务状态（/review 或 code_review 发起的任务）。')
-          .argument('<taskId>', '任务 id（/review 返回的任务卡里；省略参数则列出最近任务）', { optional: true })
-          .action(async (argv) => {
-            return statusPayload(argv.taskId).text;
-          });
+            return { kind: 'success', text };
+          },
+        }));
+        disposers.push(sctx.commands.register({
+          definitionId: 'dsh-code-review/review-status',
+          name: 'review-status',
+          description: '查询后台评审任务状态（/review 或 code_review 发起的任务）。',
+          input: { hint: '[taskId]（省略则列出最近任务）' },
+          handler: ({ rawInput }) => {
+            const taskId = String(rawInput ?? '').trim().split(/\s+/)[0] || undefined;
+            return { kind: 'success', text: statusPayload(taskId).text };
+          },
+        }));
       } catch (error) {
         sctx.logger?.warn?.(`[dsh-code-review] /review 命令注册失败（工具 code_review 仍可用）：${String(error?.message ?? error)}`);
       }
     });
   } catch (error) {
     // ctx.inject 本身抛错（宿主能力差异）→ 仅告警，不阻塞挂载。
-    ctx.logger?.warn?.(`[dsh-code-review] command 服务不可用，/review 跳过（工具 code_review 仍为主力）：${String(error?.message ?? error)}`);
+    ctx.logger?.warn?.(`[dsh-code-review] commands 服务不可用，/review 跳过（工具 code_review 仍为主力）：${String(error?.message ?? error)}`);
   }
 }
 
@@ -552,8 +601,8 @@ function registerCommand(ctx, getConfig) {
 
 // 必需服务注入声明见第 35 行（export const inject = ['tools', 'settings']）：
 // tools = code_review 工具（核心入口）、settings = 设置面板，均为静态必需注入；
-// command（/review 命令）与 webServer（GUI 任务数据路由/完成推送）为可选增强 →
-// 各自经 ctx.inject 动态注入，缺服务不阻塞挂载（工具仍为主力入口，会话内查询兜底）。
+// commands（/review 命令，复数服务）与 webServer（GUI 任务数据路由/完成推送）为
+// 可选增强 → 各自经 ctx.inject 动态注入，缺服务不阻塞挂载（工具仍为主力入口）。
 
 /**
  * 挂载后台任务的宿主可见面：
@@ -649,8 +698,8 @@ export function apply(ctx, configRaw) {
     }
   });
 
-  // 斜杠命令 /review。
-  registerCommand(ctx, getConfig);
+  // 斜杠命令 /review（可选 commands 服务，注册的卸载函数收集进 disposers）。
+  registerCommand(ctx, getConfig, disposers);
 
   // 后台任务宿主可见面（GUI 数据路由 + 完成推送；可选能力，缺服务不阻塞）。
   mountTaskApi(ctx, disposers);

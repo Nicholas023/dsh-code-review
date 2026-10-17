@@ -121,7 +121,7 @@ let cards = []; // 捕获注册的全部卡片（设置卡 + 任务卡各自注�
  *  插件条目」真断言（原断言硬编码 true），subscribe 供「设置卡真的订阅了表单」真
  *  断言（SettingsCard 的 useEffect 每渲染订阅一次）。 */
 const fakeForm = {
-  snapshot: { status: 'ready', mode: 'host', writable: true, revision: 0, value: {} },
+  snapshot: { status: 'ready', writable: true, revision: 0, value: {} },
   gets: 0,      // configForms.get 命中计数
   lastId: null, // 最近一次 get 收到的插件条目 id（
   subscribes: 0, // form.subscribe 消费计数

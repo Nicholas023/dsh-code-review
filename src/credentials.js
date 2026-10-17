@@ -10,6 +10,16 @@
  * 类别**（如 EACCES / ENOSPC，见 readCredentialsYaml）——不含文件路径、不含任何
  * 值，既能诊断又不扩大泄露面。yaml 解析用细粒度正则——只认
  * `NAME: value` / `NAME=value`（0~4 空格缩进），不做通用 YAML 展开。
+ *
+ * 通道优先级（任何一步取到非空即停）：
+ *   1. DSH 凭据文件（home 下 .dsh 目录的凭据 yaml）同名条目（只读正则解析）；
+ *   2. 环境变量（DSH 会话/宿主已注入，如 DEEPSEEK_API_KEY）。
+ *
+ * ⚠ 顺序于 DSH 0.2.1 翻转：**存储的凭据优先于导出的环境变量**
+ * （docs/upgrade-guide/v0.2.1-alpha.2/stored-credentials-precedence：此前 env 优先，
+ * 0.2.1 起 `.credentials.yaml` 的 refs 条目优先，仅当文件未存储该名字时才用导出变量；
+ * 随附 headless profile 禁用凭据存储、只用启动环境/.env）。本插件对齐该口径，避免
+ * 「宿主用存储 key、引擎却用同名导出变量」的认证错位。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -67,8 +77,9 @@ function readCredentialsYaml(name) {
  * 解析指定引用名（apiKeyEnv）的真实 key。
  *
  * 通道优先级（任何一步取到非空即停）：
- *   1. 环境变量（DSH 会话/宿主已注入，如 DEEPSEEK_API_KEY）；
- *   2. DSH 凭据文件（home 下 .dsh 目录的凭据 yaml）同名条目（只读正则解析）。
+ *   1. DSH 凭据文件（home 下 .dsh 目录的凭据 yaml）同名条目（只读正则解析）；
+ *   2. 环境变量（DSH 会话/宿主已注入，如 DEEPSEEK_API_KEY）。
+ * 顺序与 DSH 0.2.1 存储凭据优先级一致（见文件头注释）。
  *
  * （ctx.credentials seam 分支已删除——所有生产调用方
  * （review-exec.js / 各 e2e）均以 undefined 调用，该分支属不可达死代码。
@@ -93,11 +104,17 @@ export function resolveApiKey(_ctx, envName, io = {}) {
   const env = io.env ?? process.env;
   const name = String(envName ?? '').trim();
   if (!name) return null;
-  // 与凭据文件通道对齐 trim 与字符串化——env 分支此前
-  // 原样返回 raw 值，行首/行尾空白会产出被污染 key（偶发 401 且仅 env 通道
-  // 复现），两个通道行为不一致。
+  // 0.2.1 起：存储凭据优先于导出变量（见文件头）。文件里存在「非空」值即采用；
+  // 显式空值 '' / 键不存在（null）都视为「文件未存储该名字」→ 继续看环境变量
+  // （与「文件没有为该名字存储值时导出变量才生效」同口径）。
+  const stored = readCredentialsYaml(name);
+  if (typeof stored === 'string' && stored.trim() !== '') return stored.trim();
+  // env 分支 trim 与文件通道对齐——原样返回 raw 值会让行首/行尾空白污染 key
+  // （偶发 401 且仅 env 通道复现）。
   if (env[name]) return String(env[name]).trim();
-  return readCredentialsYaml(name);
+  // 两处都无：透传文件结果（null = 未配置；'' = 文件里显式空值），调用方按
+  // isKeyMissing 统一降级。
+  return stored;
 }
 
 /** 判定 key 是否缺失或为空（供工具结果给出明确降级文案）。

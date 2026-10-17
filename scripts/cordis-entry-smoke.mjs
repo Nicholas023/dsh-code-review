@@ -101,6 +101,7 @@ for (const m of ['config', 'settings-schema', 'plugin-config', 'runner', 'report
 
 /* ---------- 3. 最小 ctx 垫片 + apply ---------- */
 const registeredTools = [];
+const registeredCommands = [];
 const ctx = {
   logger: { info: () => {}, warn: () => {}, error: () => {} },
   effect: (fn) => {
@@ -120,16 +121,18 @@ const ctx = {
     replace: () => {},
     configure: () => {},
   },
+  // ctx.get：未声明的可选服务读取口（model-provider 的 agentDefaultModel）。
+  get: () => undefined,
   inject: (_names, fn) => {
     if (typeof fn === 'function') fn(ctx);
     return () => {};
   },
-  command: () => {
-    const cmd = {
-      option: () => cmd,
-      action: () => cmd,
-    };
-    return cmd;
+  // 0.2.x 命令服务：复数 commands，`register(definition)` 返回卸载函数。
+  commands: {
+    register: (definition) => {
+      registeredCommands.push(definition);
+      return () => {};
+    },
   },
 };
 
@@ -150,6 +153,14 @@ check(
     && registeredTools.some((t) => t?.name === 'code_review_status')
     && registeredTools.some((t) => t?.name === 'code_review_set_config'),
   JSON.stringify(registeredTools.map((t) => t?.name))
+);
+
+check(
+  '注册了 /review 与 /review-status 斜杠命令（0.2.x 复数 commands 服务，register 形态）',
+  Array.isArray(registeredCommands) && registeredCommands.length === 2
+    && registeredCommands.some((c) => c?.name === 'review' && typeof c?.handler === 'function')
+    && registeredCommands.some((c) => c?.name === 'review-status' && typeof c?.handler === 'function'),
+  JSON.stringify(registeredCommands.map((c) => c?.name))
 );
 
 if (dispose) {

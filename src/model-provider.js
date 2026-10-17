@@ -183,8 +183,17 @@ function buildModelRoutes() {
     if (hasBaseURL && !isOfficialPaidUrl(url)) {
       const keyEnv = typeof deepCfg?.apiKeyEnv === 'string' && deepCfg.apiKeyEnv.trim() ? deepCfg.apiKeyEnv.trim() : DEEPSEEK_OFFICIAL_DEFAULT.keyEnv;
       const protocol = engineProtocolOf(deepCfg?.api);
+      // DSH 0.2.1：deepseek-account 路由不再接受 `models` 目录（模型改由账号
+      // GET /models 端点列出，条目里残留 models 会让该路由插件加载即失败），
+      // 单模型调整迁到 `modelOverrides.<id>`。这里对两种形态都做尽力解析——
+      // 数组 models（旧/第三方兼容网关）优先，缺失时回退 modelOverrides 的键集
+      // （仅有被覆盖过的模型，非全量目录；全量目录在账号侧，配置里拿不到）。
       const m = deepCfg.models;
-      const models = Array.isArray(m) ? m : [];
+      const models = Array.isArray(m)
+        ? m
+        : (deepCfg.modelOverrides && typeof deepCfg.modelOverrides === 'object'
+          ? Object.keys(deepCfg.modelOverrides).map((id) => ({ id }))
+          : []);
       for (const mm of models) {
         const id = mm?.id ?? mm?.name;
         if (!id) continue;
@@ -276,13 +285,13 @@ export function createModelSource(ctx) {
 
   /** 会话当前模型：优先 ctx 官方取数口；拿不到回 ''（由 resolveProvider 回退至用户配置首条路由，路由表空则返回 null）。 */
   function currentSessionModel() {
-    // 删除占位死代码 `listProviders?.().length >= 0 ? null : null`
-    // ——两分支恒 null、void m 无作用，且 listProviders 存在但返回 undefined 时
-    // `?.().length` 还会抛 TypeError（被 catch 吞掉）。ctx.llm 官方取数口当前
-    // 仅接入 agentDefaultModel；如需 listProviders/模型发现，在此补真实现并加
-    // 测试，不要放占位。
+    // 未声明的可选服务必须经 ctx.get(name) 读取，不能直接属性访问
+    // （docs/cordis-api/context.md：`ctx.<name>` 的 shadow 遍历对未注入服务可能抛错；
+    // agentDefaultModel 不在本插件静态 inject 内）。旧写法 `ctx?.agentDefaultModel`
+    // 在 0.2.1 上按未注入服务处理，会静默落空导致会话模型透传失效。
     try {
-      const sel = ctx?.agentDefaultModel?.currentSelection?.();
+      const defaultModel = ctx?.get?.('agentDefaultModel');
+      const sel = defaultModel?.currentSelection?.();
       if (sel?.model) return String(sel.model);
     } catch {
       /* 尽力而为 */
