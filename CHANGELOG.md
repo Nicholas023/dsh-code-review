@@ -20,7 +20,7 @@
 - GUI 可见性：插件页任务卡实时刷新（`/api/code-review/tasks`、`/api/code-review/events` 数据路由 + SSE）。
 - 敏感文件点名：敏感 / 凭据类路径内容不送审（引擎内置排除），插件层自检待提交清单并逐文件点名列入报告，提示人工确认是否该提交——不许静默。
 - 结果双给：会话内完整问题清单（文件 + 行号 + 类型 + 严重度 + 建议）+ 报告文件按日期 / 仓库存档（`<报告目录>/<YYYY-MM-DD>/<仓库名>-<时间戳>.md`），作为「发 GitHub 前已审过」的凭证。
-- 并发评审开关与并发广度（1–32，默认单线）——开启后并行审查提速、token 消耗增加，成本控制权在用户侧；设置面板保存经 `POST /api/code-review/config` 直落运行真源。
+- 并发评审开关与并发广度（范围 1–32，默认 8；开关默认关 = 单线顺序审查）——开启后并行审查提速、token 消耗增加，成本控制权在用户侧；设置面板保存经 `POST /api/code-review/config` 直落运行真源。
 - 配置通道：运行真源为插件自有配置文件 `~/.dsh/dsh-code-review/plugin-config.json`，经 `code_review_set_config` 工具读写（写入即生效，无需重启）。
 - 首次启用引导（确认评审模型沿用 / 报告目录等，见 `first_run`）。
 - 仓库基础文件：README、LICENSE（Apache-2.0）、NOTICE（上游归属）、CONTRIBUTING、SECURITY、PR 模板、package-lock.json 锁依赖。
