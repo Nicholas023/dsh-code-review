@@ -45,14 +45,16 @@ window.__ModuleLoader__.load({
      * @param {unknown} snap 宿主 form.getSnapshot() 的返回值。
      * @returns {boolean} 是否可用（对象 + 含 value 键 + writable 为布尔）。
      */
-    // 除 value/writable 外还要求 mode/status 是字符串：下游可写判定与诊断文案
-    // 直接读 snapshot.mode / snapshot.status，缺字段时 writable 恒 false，
-    // 界面会显示「status=undefined mode=undefined」这类无从排查的只读态。
+    // 除 value/writable 外还要求 status 是字符串：下游可写判定与诊断文案直接读
+    // snapshot.status，缺字段时 writable 恒 false、界面显示「status=undefined」这类
+    // 无从排查的只读态。
+    // ⚠ DSH 0.2.1 起客户端 ConfigFormSnapshot 移除了 `mode` 字段
+    // （0.2.0 为 'host' | 'memory'）——校验与可写判定都不再读它，否则快照判为坏形状、
+    // 卡片永久只读（docs/upgrade-guide 无此条，属 0.2.1 客户端 API 变更）。
     const isUsableSnapshot = (snap) => !!(
       snap && typeof snap === 'object'
       && 'value' in snap
       && typeof snap.writable === 'boolean'
-      && typeof snap.mode === 'string'
       && typeof snap.status === 'string'
     );
 
@@ -211,7 +213,7 @@ window.__ModuleLoader__.load({
       // 其余字段由读取方各自容错。
       const formUsable = !!(form && typeof form.getSnapshot === 'function' && typeof form.subscribe === 'function');
       const [snapshot, setSnapshot] = React.useState(() => {
-        const fallback = { value: {}, writable: false, mode: 'degraded', status: 'unavailable' };
+        const fallback = { value: {}, writable: false, status: 'unavailable' };
         if (!formUsable) return fallback;
         try {
           const snap = form.getSnapshot();
@@ -273,9 +275,9 @@ window.__ModuleLoader__.load({
 
 
       const value = snapshot.value ?? {};
-      /** 可写条件：Host 承载 + 状态 ready。 */
-      const writable = snapshot.writable && snapshot.mode === 'host' && snapshot.status === 'ready';
-      const diag = 'status=' + snapshot.status + ' mode=' + snapshot.mode + ' writable=' + snapshot.writable
+      /** 可写条件：Host 承载 + 状态 ready（0.2.1 起快照无 mode 字段，见 isUsableSnapshot 注释）。 */
+      const writable = snapshot.writable && snapshot.status === 'ready';
+      const diag = 'status=' + snapshot.status + ' writable=' + snapshot.writable
         + ' revision=' + (snapshot.revision === undefined ? '-' : snapshot.revision)
         + ' 生效字段=' + Object.keys(value).length;
 

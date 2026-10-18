@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+### DSH 0.2.1 适配
+
+面向 DeepSeek Harness **0.2.1**（npm `next` 线，如 `0.2.1-rc.2`；本插件原基线为 0.2.0）的适配。
+0.2.1 在插件 API 面基本稳定，差异集中在数据语义与命令服务；本次逐条对齐，并修掉两个从未生效的历史接点。
+
+- **兼容声明**：`package.json` 增补 `engines.dsh: ">=0.2.0-rc.2 <0.3.0"` —— 0.2.1 起插件版本兼容性
+  以 `engines.dsh` 优先判定（`docs/upgrade-guide/v0.2.1-alpha.3/plugin-engines-dsh`），显式声明支持的
+  宿主区间（含 0.2.0-rc.2 ~ 0.2.1 各 prerelease）。
+- **斜杠命令接入 0.2.x 命令 API（Fixed）**：`/review`、`/review-status` 改走**复数 `commands` 服务**
+  `ctx.commands.register({ name, description, input, handler })`；此前用**单数 `command` 服务** +
+  链式 `.command().option().argument().action()`，该服务在 0.2.x 任一版本都不存在 →
+  `ctx.inject(['command'], …)` 永不就绪、命令**从未注册成功**。命令名之后的原文改由命令自解析
+  （`parseReviewInput`），发起会话与工作目录取自 `invocation.agent.session`（`session.id` /
+  `session.header.cwd`），不再依赖已不存在的 `argv.session`。
+- **设置卡片可写判定（Fixed）**：客户端 `ConfigFormSnapshot` 在 0.2.1 移除了 `mode` 字段
+  （0.2.0 为 `'host' | 'memory'`）——快照形状校验与可写判定不再依赖 `mode`，否则快照被误判为坏形状、
+  卡片永久只读（并连带使面板内的并发开关失效）。
+- **凭据优先级对齐 0.2.1（Changed）**：评审 key 解析改为**存储凭据优先于导出环境变量**
+  （此前 env 优先），对齐 DSH 0.2.1 的 stored-credentials-precedence
+  （`docs/upgrade-guide/v0.2.1-alpha.2/stored-credentials-precedence`）；文件里存在非空值即采用，
+  否则回退同名环境变量（覆盖 headless profile 无凭据存储、只用启动环境 / `.env` 的情形）。
+- **评审模型取值口（Fixed）**：会话当前模型的读取改经 `ctx.get('agentDefaultModel')`
+  （未在静态 `inject` 内的可选服务直接属性访问会落空 / 抛错），恢复「默认沿用会话模型」透传。
+- **模型目录读法（Fixed）**：deepseek-account 路由 0.2.1 起不再接受 `models` 目录字段（模型改由账号
+  端点列出、单模型调整迁 `modelOverrides`）——模型候选解析改为「数组 `models` 优先，缺失时回退
+  `modelOverrides` 键集」，避免读到空目录。
+- **自检增强**：Cordis 入口冒烟新增「/review 与 /review-status 已注册」断言；客户端冒烟的快照垫片
+  去掉 `mode`，与 0.2.1 快照形状对齐。
+
 ## [0.1.0] - 2026-10-17
 
 首个公开版本：Cordis 原生代码审查插件，把评审引擎 `codecheck`（open-code-review 的 fork 改造，Apache-2.0）

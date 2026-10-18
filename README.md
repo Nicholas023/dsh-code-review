@@ -40,8 +40,9 @@
 
 **喂参机制（OCR-managed）**：插件运行时把评审模型解析成
 `OCR_LLM_URL / OCR_LLM_TOKEN / OCR_LLM_MODEL / OCR_LLM_PROTOCOL / OCR_LLM_TIMEOUT`
-五个环境变量注入引擎子进程（key 解析顺序：环境变量 → `~/.dsh/.credentials.yaml` 顶层条目 →
-DSH 凭据 seam；key 只进子进程环境，**不落盘、不进日志**）。若用户已在
+五个环境变量注入引擎子进程（key 解析顺序：`~/.dsh/.credentials.yaml` 的 `refs` 条目 →
+同名环境变量 —— **存储凭据优先于导出变量**，与 DSH 0.2.1 的
+stored-credentials-precedence 口径一致；key 只进子进程环境，**不落盘、不进日志**）。若用户已在
 `~/.opencodereview/config.json` 显式完整配置 provider，引擎按其自身优先序使用用户配置
 （期望行为）；插件注入作为引擎侧未配置时的默认通道。
 
@@ -89,6 +90,17 @@ npm run selfcheck                    # unit + smoke 全量
 > e2e 会调用真实评审 API（约 10-50s / 次、数千 token），在 CI/无凭据环境会自动
 > 判失败并给出明确原因。切模型实证默认模型可经命令行参数替换：`node scripts/switch-model-e2e.mjs <模型id>`
 > （模型 id 以本机 DSH 配置为准，即 `code_review_set_config` 的 review_model 取值）。
+
+## 兼容性（DSH 版本）
+
+- 适配目标：**DeepSeek Harness 0.2.1**（npm `next` 线，如 `0.2.1-rc.2`）；同时兼容本插件原基线
+  **0.2.0**（如桌面端 `0.2.0-rc.2`）。
+- 兼容区间由 `package.json` 的 `engines.dsh`（`>=0.2.0-rc.2 <0.3.0`）声明 —— DSH 0.2.1 起
+  插件版本兼容性以该字段优先判定（`docs/upgrade-guide/v0.2.1-alpha.3/plugin-engines-dsh`）。
+- 插件 API 面（工具注册 / 设置域 `configForms` / 客户端模块协议 / `dsh.bundle.patch` 组合注入）
+  在 0.2.1 保持稳定；0.2.1 的差异集中在数据语义（凭据优先级、模型目录）与命令服务（复数
+  `commands` 服务，此前用的单数 `command` 服务不存在），本插件已逐条对齐 —— 详见
+  `CHANGELOG.md` 的 Unreleased 小节。
 
 ## 许可与上游归属
 
