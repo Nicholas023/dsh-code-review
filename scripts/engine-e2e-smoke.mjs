@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/engine-e2e-smoke.mjs —— 判据⑤引擎侧端到端实证：
  * 「评审模型（用户配置的端点，经 OCR_LLM_* 环境变量注入）

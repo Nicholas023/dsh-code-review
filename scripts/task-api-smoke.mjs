@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/task-api-smoke.mjs —— 任务 API 与完成推送冒烟自检（「GUI 可见」之二）。
  *

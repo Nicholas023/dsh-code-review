@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * src/credentials.js —— 评审 key 解析（步骤 5 零落盘通道）。
  *

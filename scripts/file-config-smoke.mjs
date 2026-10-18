@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * file-config-smoke.mjs —— file-config.js + set-config-tool.js 单元冒烟。
  *

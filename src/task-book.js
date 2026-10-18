@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * task-book.js —— 后台评审任务簿（目录协议）与 serve 单例管理。
  *

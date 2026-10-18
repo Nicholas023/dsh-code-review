@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * sensitive-list.js —— 敏感文件点名层（敏感文件内容不送审，逐一点名列入报告）。
  *

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * serve-entry.js —— 后台评审服务（独立进程，detached 挂后台，按需加载）。
  *

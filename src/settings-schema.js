@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * settings-schema.js —— dsh-code-review「智能代码审查」设置命名空间的 schemastery 定义。
  *

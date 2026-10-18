@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * client.js —— dsh-code-review 的 Web（浏览器）侧插件形态。
  *

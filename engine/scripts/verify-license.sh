@@ -11,8 +11,18 @@ cd "$REPO_ROOT"
 CURRENT_YEAR=$(date +%Y)
 MIN_YEAR=2026
 SPDX_REGEX="SPDX-License-Identifier: Apache-2.0"
-COPYRIGHT_REGEX="Copyright [0-9]{4} alibaba/open-code-review Contributors"
 YEAR_REGEX="Copyright ([0-9]{4})"
+# dsh-code-review 是 open-code-review 的 fork：engine/ 内文件保留上游归属，
+# 插件根（engine/ 之外）文件属于本仓库（与根 NOTICE 的归属口径一致）。
+# 单持有人时代上游脚本硬编码 alibaba，会给我们自己的文件盖上虚假归属。
+license_holder() {
+  local file="$1"
+  if [[ "$file" == engine/* ]]; then
+    echo "alibaba/open-code-review Contributors"
+  else
+    echo "dsh-code-review contributors"
+  fi
+}
 
 # Keep in step with LICENSE_EXTS in add-license.sh, which also records why each
 # extension is in or out. This side only greps for the header text, so the
@@ -61,8 +71,9 @@ while IFS= read -r file; do
     continue
   fi
 
-  if ! grep -qE "$COPYRIGHT_REGEX" <<<"$header"; then
-    FAILED+=("$file (missing copyright notice)")
+  holder="$(license_holder "$file")"
+  if ! grep -qE "Copyright [0-9]{4} ${holder}" <<<"$header"; then
+    FAILED+=("$file (missing copyright notice: ${holder})")
     continue
   fi
 

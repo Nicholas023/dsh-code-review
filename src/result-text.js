@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * result-text.js —— 评审执行结果 → 会话内文本的组装（唯一定义点）。
  *
