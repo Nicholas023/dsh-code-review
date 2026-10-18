@@ -5,27 +5,15 @@
 *.iws
 
 dist/
-npm/*/bin/
 coverage.out
 coverage.html
-.claude/plans
-.claude/commands/comment.md
-.claude/commands/read-issue.md
-.claude/settings.local.json
 
-pages/package-lock.json
 scripts/hooks/
-scripts/publish/.env.internal
 CHANGELOG.md
 
 vendor/
 temp/
 .codegraph/
-
-# Ignore downloaded Go binary, but keep JS entry point
-!bin/ocr.js
-bin/ocr
-bin/opencodereview
 
 /opencodereview
 

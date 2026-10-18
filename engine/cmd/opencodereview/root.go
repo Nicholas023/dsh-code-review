@@ -17,11 +17,15 @@ var rootCmd = &cobra.Command{
 	// colliding with optical character recognition naming. Upstream attribution
 	// (OpenCodeReview brand) is preserved.
 	Use:   "codecheck",
-	Short: "OpenCodeReview - AI-Powered Code Review CLI",
-	Long: `OpenCodeReview - AI-Powered Code Review CLI
+	Short: "codecheck — AI-powered code review engine (fork of OpenCodeReview)",
+	Long: `codecheck — AI-powered code review engine (fork of OpenCodeReview)
 
-An AI-powered code review tool that reads git diffs, sends them to a
-configurable LLM service, and generates review comments.`,
+Reads git diffs, sends them to a configurable LLM service, and generates
+review comments.
+
+Fork of alibaba/open-code-review (Apache-2.0); the command name is codecheck
+instead of upstream's ocr, which collides with optical character
+recognition.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	// Runs for every subcommand, always before any RunE: validate --color once
@@ -62,7 +66,7 @@ var rootCommandName func() string
 func init() {
 	rootCommandName = rootCmd.Name
 	rootCmd.SetFlagErrorFunc(flagErrorWithSuggestion)
-	rootCmd.Flags().BoolP("version", "V", false, "version for ocr")
+	rootCmd.Flags().BoolP("version", "V", false, "print version information")
 	addColorFlags(rootCmd)
 
 	rootCmd.AddCommand(versionCmd)

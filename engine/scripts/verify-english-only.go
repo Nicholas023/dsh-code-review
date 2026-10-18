@@ -72,12 +72,10 @@ var scannedNames = map[string]bool{"Makefile": true}
 
 // allowedPrefixes exempts paths whose non-English content is expected. Keep
 // each entry narrow and justified; a temporary entry must say what removes it.
-var allowedPrefixes = []struct{ prefix, reason string }{
-	{"pages/src/i18n/", "translated UI copy for the docs site"},
-	{"extensions/vscode/package.nls.", "translated UI copy for the extension manifest bundles"},
-	{"extensions/frontend/src/shared/i18n.ts", "translated UI copy for the extension webview"},
-	{"extensions/idea/src/main/kotlin/com/alibaba/opencodereview/idea/model/HostStrings.kt", "host-side mirror of the webview i18n table"},
-}
+// The upstream entries (pages/ docs-site i18n, extensions/ IDE plugin bundles)
+// are gone: neither tree was ever committed to this fork (PR-A also removed
+// the upstream docs references). Re-add an entry only for a tree that exists.
+var allowedPrefixes = []struct{ prefix, reason string }{}
 
 // exemptMarker on a line suppresses the report for that line. The trailing
 // colon is part of the marker so that a bare "allow-non-english" cannot exempt

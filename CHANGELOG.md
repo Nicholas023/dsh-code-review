@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### 引擎 fork 治理（#2–#7 合并）
+
+- **死重清理（#3 PR-A）**：删除上游发布/社区死重设施（`examples/*_ci/`、`install.*`、`scripts/publish/*`、`scripts/github-actions/*`、`npm/*/package.json`、`internal/llm/gen/**`、`scripts/{install,update,version,platform}.js` 等 70 文件，净删约 2.9 万行）与指向已删目录的失效引用；`engine/AGENTS.md` 收敛为一句「沿用上游开发约定」
+- **固定规则数据化（#2 PR-D）**：三条固定评审规则正文自 Go 常量迁至 `engine/internal/config/rules/rule_docs/fork_mandatory.md`（数据驱动，与同目录 54 个规则文档同构，`//go:embed` 读入）；项目规则 `.opencodereview/rule.json` 上移仓库根
+- **fork 身份与版本可辨识（#4 PR-C）**：`codecheck --version` 输出 `<插件版本>+fork.<N> (g<sha>)`；构建单一真源 `engine/scripts/build-fork.sh`；新增 `engine/NOTICE`（Apache-2.0 §4 上游归属）与 `engine/FORK_NOTES.md`；`--version` 归属行保留
+- **命令名收敛（#5 PR-B）**：用户可见文案 `ocr`→`codecheck`（135 处分类处置：改 101 / 契约保留 13 / 注释 19）；命令名唯一真源（`internal/buildinfo.CommandName`）+ 防漂移护栏测试
+- **SPDX 双持有人合规（#6 PR-E）**：插件根 32 个 js/mjs 文件补 SPDX 头；`verify-license.sh`/`add-license.sh` 按路径分发持有人（engine/ → 上游 alibaba，插件根 → dsh-code-review contributors）
+- **集成收尾（#7 PR-F）**：`engine/Makefile` 对齐 `build-fork.sh`（二进制名 `codecheck`、版本真源直读根 `package.json`、去 `/extensions/` 过期过滤器）；`root.go` 帮助文案 fork 身份化（保留 Apache-2.0 归属）；`verify-english-only.go` 豁免表清 4 条死条目；`.gitignore` 死条目清理；`engine/imgs/**` 孤儿图片（12 个，约 2.6 MB）整目录删除；CI 新增引擎 `go test -short` + `go build` 门禁；根 `README.md` 增加 `engine/FORK_NOTES.md` 指针
+
 ## [0.1.1] - 2026-10-18
 
 ### DSH 0.2.1 适配
