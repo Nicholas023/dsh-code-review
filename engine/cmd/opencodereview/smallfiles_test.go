@@ -29,8 +29,10 @@ func TestPrintVersion_Dev(t *testing.T) {
 	got := captureStdout(t, func() {
 		printVersion()
 	})
-	if !strings.Contains(got, "open-code-review dev") {
-		t.Errorf("expected 'open-code-review dev', got %q", got)
+	// 命令名唯一真源为 codecheck（rootCommandName），dev 版输出 "codecheck dev ..."；
+	// 第二行保留上游归属说明（fork of open-code-review），此处不断言它。
+	if !strings.Contains(got, "codecheck dev") {
+		t.Errorf("expected 'codecheck dev', got %q", got)
 	}
 	if !strings.Contains(got, runtime.GOOS+"/"+runtime.GOARCH) {
 		t.Errorf("expected OS/ARCH, got %q", got)

@@ -6,6 +6,7 @@ package delegate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -216,9 +217,9 @@ func TestDelegateDiffExamples(t *testing.T) {
 				if example != "cat \"<path>\"" {
 					t.Fatal("untracked file path must be quoted")
 				}
-				bash, err := exec.LookPath("bash")
+				bash, err := usableBash()
 				if err != nil {
-					t.Skip("shell execution requires Bash; path quotation was checked")
+					t.Skip("shell execution requires a real Bash; path quotation was checked")
 				}
 				name := "untracked sample file.txt"
 				if err := os.WriteFile(filepath.Join(r.dir, name), []byte("untracked\n"), 0o644); err != nil {
@@ -449,4 +450,47 @@ func assertDelegatePatch(t *testing.T, patch, want string) {
 	if strings.Contains(patch, "\x1b[") {
 		t.Error("patch contains ANSI color escapes")
 	}
+}
+
+// usableBash returns a Bash that forwards positional arguments after -c.
+// Windows ships the WSL launcher stub C:\Windows\System32\bash.exe, which is
+// not a real Bash: with no distribution installed it drops the arguments after
+// -c, so "$1" expands empty ("cat: ”: No such file or directory"). Detecting
+// it by probing argument forwarding (rather than by path shape) stays correct
+// even on hosts with an empty PATH or no SystemRoot set.
+func usableBash() (string, error) {
+	// 候选：显式枚举 PATH 各项（含空项 = 当前目录）；Unix 上无 .exe 后缀。
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	var candidates []string
+	seen := map[string]bool{}
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		p := filepath.Join(d, "bash"+ext)
+		key := strings.ToLower(filepath.Clean(p))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			candidates = append(candidates, p)
+		}
+	}
+	if len(candidates) == 0 {
+		// 兜底（Unix 的常规 PATH 查找；Windows 上可能仍命中 WSL stub，靠探测淘汰）。
+		p, err := exec.LookPath("bash")
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, p)
+	}
+	for _, c := range candidates {
+		// 行为探测：-c 之后的 $1 必须能收到参数。
+		probe := exec.Command(c, "-c", "test -n \"$1\"", "probe", "arg")
+		if err := probe.Run(); err == nil {
+			return c, nil
+		}
+	}
+	return "", errors.New("no usable bash found (only the WSL launcher stub is present)")
 }
