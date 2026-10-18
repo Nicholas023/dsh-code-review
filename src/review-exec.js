@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * review-exec.js —— 一次评审的纯执行体（会话工具与后台 serve 共用，无 ctx 依赖）。
  *

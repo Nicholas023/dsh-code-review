@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/alibaba/open-code-review/internal/buildinfo"
 )
 
 // ResolvedEndpoint holds the resolved LLM endpoint configuration.
@@ -566,7 +568,7 @@ func tryProviderConfig(cfg configFile, modelOverride string) (ResolvedEndpoint, 
 	}
 
 	if model == "" {
-		return ResolvedEndpoint{}, false, fmt.Errorf("provider %q has no model configured; run 'ocr config model' to select one or pass --model", cfg.Provider)
+		return ResolvedEndpoint{}, false, fmt.Errorf("provider %q has no model configured; run '%s config model' to select one or pass --model", cfg.Provider, buildinfo.CommandName)
 	}
 
 	if protocol == ProtocolAnthropic {

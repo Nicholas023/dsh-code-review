@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * src/model-provider.js —— 评审模型源（步骤 5 核心）。
  *

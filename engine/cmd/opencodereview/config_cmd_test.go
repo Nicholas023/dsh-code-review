@@ -511,7 +511,7 @@ func TestSetConfigValueCustomProviderAuxiliaryFieldRequiresExistingProvider(t *t
 				t.Fatalf("expected error for %s on a missing provider", tt.key)
 			}
 			want := "provider \"" + tt.provider + "\" is not configured; set a core field first (protocol is required for every custom provider):\n" +
-				"  ocr config set " + tt.coreKey + " <protocol>"
+				"  " + commandName + " config set " + tt.coreKey + " <protocol>"
 			if err.Error() != want {
 				t.Errorf("error = %q, want %q", err, want)
 			}

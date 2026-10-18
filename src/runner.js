@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * runner.js —— 引擎 codecheck 的定位与子进程调用（OCR-managed 模式管家）。
  *

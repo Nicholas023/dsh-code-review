@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/plugin-e2e-smoke.mjs —— 判据⑤插件侧端到端实证：
  * 「插件接入位（model-provider → credentials → prepareEngineEnv → runEngine）

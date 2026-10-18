@@ -31,7 +31,7 @@ import (
 	"github.com/alibaba/open-code-review/internal/tool"
 )
 
-// commonContext bundles the state that both `ocr review` and `ocr scan`
+// commonContext bundles the state that both `codecheck review` and `codecheck scan`
 // need to load *before* deciding whether to dispatch a preview or a real
 // LLM session: a validated template, the resolved repo path, review rules,
 // and a shared git subprocess limiter.
@@ -171,7 +171,7 @@ func resolveWorkingDir(input string, requireGit bool) (string, bool, error) {
 		return "", false, fmt.Errorf("%s is not a git repository", absPath)
 	}
 	// #287: git reports diff and `git show HEAD:<path>` paths relative to the
-	// repository root, not the current directory. When `ocr review` runs from a
+	// repository root, not the current directory. When `codecheck review` runs from a
 	// subdirectory of a monorepo, anchor RepoDir at the git top-level so those
 	// root-relative paths resolve for both disk reads and git-show reads.
 	// requireGit is true only for the review path; scan (requireGit=false) keeps
@@ -347,7 +347,7 @@ func applyCLIExcludes(cc *commonContext, patterns []string) {
 }
 
 // excludeToolDef returns a copy of defs with any entries whose function name
-// matches name removed. Used by `ocr scan` to hide tools that don't make
+// matches name removed. Used by `codecheck scan` to hide tools that don't make
 // sense in full-scan mode (e.g. file_read_diff).
 func excludeToolDef(defs []llm.ToolDef, name string) []llm.ToolDef {
 	out := make([]llm.ToolDef, 0, len(defs))
@@ -544,7 +544,7 @@ func (w *stripAnsiWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-const outputTempPrefix = ".ocr-out-"
+const outputTempPrefix = "." + commandName + "-out-"
 
 // createOutputTemp creates a collision-resistant file in the target directory.
 // Unlike os.CreateTemp, the 0666 mode preserves os.Create's umask-sensitive
@@ -803,8 +803,8 @@ type resumeInfoProvider interface {
 	ResumeInfo() *agent.ResumeInfo
 }
 
-// emitRunResult is the post-LLM-run finalization shared by `ocr review` and
-// `ocr scan`: resolves comment line numbers, records telemetry, restores
+// emitRunResult is the post-LLM-run finalization shared by `codecheck review` and
+// `codecheck scan`: resolves comment line numbers, records telemetry, restores
 // stdout early for agent-text audiences so the summary is visible, prints
 // the trace summary, and writes the result in the requested format.
 //
@@ -812,7 +812,7 @@ type resumeInfoProvider interface {
 // silencing was set up (in which case the early restore is a no-op).
 //
 // retryReport is the frozen LLM retry report, or nil when there is nothing to
-// report (a clean run, or a caller that produces no report at all — `ocr scan`
+// report (a clean run, or a caller that produces no report at all — `codecheck scan`
 // never freezes one). It is passed as a parameter rather than added to
 // ResultProvider because the collector belongs to llmRuntime, not to the
 // agent; putting it on the interface would force internal/scan.Agent to

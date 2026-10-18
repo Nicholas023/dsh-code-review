@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/settings-register-repro.mjs —— 宿主等价复现：settings.register 链路冒烟。
  *

@@ -1,0 +1,54 @@
+codecheck — dsh-code-review review engine
+Copyright 2026 dsh-code-review contributors
+
+This product includes software developed at Alibaba Group
+(https://github.com/alibaba/open-code-review), used under the
+Apache License, Version 2.0.
+
+================================================================================
+Fork attribution / Third-party notice
+================================================================================
+
+The review engine in this directory (source under engine/, and the binary
+bin/codecheck(.exe) shipped as a GitHub Release asset) is a fork of:
+
+  Project     : open-code-review
+  Upstream    : https://github.com/alibaba/open-code-review
+  Copyright   : Copyright 2026 alibaba/open-code-review Contributors
+  License     : Apache License 2.0
+
+  This fork    : https://github.com/Nicholas023/dsh-code-review
+
+================================================================================
+Modifications (Apache-2.0 §4(b))
+================================================================================
+
+  * Renamed the CLI command (and log prefix) from "ocr" to "codecheck" to avoid
+    colliding with "optical character recognition". The upstream OpenCodeReview
+    brand and attribution are preserved.
+  * Hard-wired three fixed review rules ahead of LoadDefault, so they apply with
+    zero configuration: security & desensitization, bug finding, and redundant /
+    out-of-scope code.
+  * Windows: subprocesses are spawned hidden (no console windows).
+  * Cross-platform process-tree termination, so a cancelled review leaves no
+    orphaned child processes.
+  * Removed the ChatGPT account (OAuth) authentication channel
+    (upstream internal/chatgptauth/, cmd/opencodereview/chatgpt_auth.go,
+    internal/llm/chatgpt.go).
+  * Kept upstream's sensitive-path exclusion: files matching sensitive patterns
+    (.ssh, private keys, .env, ...) are never sent to the model.
+
+The modified source lives in engine/. Every source file keeps its upstream
+`SPDX-License-Identifier: Apache-2.0` line and copyright header.
+
+================================================================================
+License and notice retention (Apache-2.0 §4(a)(c))
+================================================================================
+
+  * The complete upstream license text is kept verbatim in engine/LICENSE.
+  * Upstream attribution for the embedded icons is kept in
+    engine/internal/viewer/static/icons/NOTICE.
+
+This repository's own code (src/, scripts/, client.js, std-facet.js, ...) is
+likewise released under the Apache License, Version 2.0; the full text is in the
+repository root LICENSE.

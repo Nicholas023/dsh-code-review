@@ -10,21 +10,40 @@ cd "$REPO_ROOT"
 
 MIN_YEAR=2026
 SPDX_REGEX="SPDX-License-Identifier: Apache-2.0"
-COPYRIGHT_REGEX="Copyright [0-9]{4} alibaba/open-code-review Contributors"
 
-SLASH_HEADER='// SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 alibaba/open-code-review Contributors'
+# Same holder split as verify-license.sh: engine/ keeps the upstream
+# attribution, the plugin root belongs to this repository.
+license_holder() {
+  local file="$1"
+  if [[ "$file" == engine/* ]]; then
+    echo "alibaba/open-code-review Contributors"
+  else
+    echo "dsh-code-review contributors"
+  fi
+}
 
-HASH_HEADER='# SPDX-License-Identifier: Apache-2.0
-# Copyright 2026 alibaba/open-code-review Contributors'
-
-# CSS has no // line comment — that is SCSS — so a block is the only option. The
-# lines inside carry no prefix, matching the {{/* */}} header already in
-# internal/viewer/templates/app-header.html.
-BLOCK_HEADER='/*
-SPDX-License-Identifier: Apache-2.0
-Copyright 2026 alibaba/open-code-review Contributors
-*/'
+# Comment syntax depends on the extension: // for Go, the JS/TS family and
+# Kotlin, # for shell and Python, /* */ for CSS.
+header_for() {
+  local file="$1"
+  local holder
+  holder="$(license_holder "$file")"
+  local ext="${file##*.}"
+  case "$ext" in
+    sh | py)
+      printf '# SPDX-License-Identifier: Apache-2.0\n# Copyright 2026 %s\n' "$holder"
+      ;;
+    css)
+      # CSS has no // line comment — that is SCSS — so a block is the only
+      # option. The lines inside carry no prefix, matching the {{/* */}} header
+      # already in internal/viewer/templates/app-header.html.
+      printf '/*\nSPDX-License-Identifier: Apache-2.0\nCopyright 2026 %s\n*/\n' "$holder"
+      ;;
+    *)
+      printf '// SPDX-License-Identifier: Apache-2.0\n// Copyright 2026 %s\n' "$holder"
+      ;;
+  esac
+}
 
 # Grouped by the comment syntax add_header gives each below: // for Go, the
 # JS/TS family and Kotlin, # for shell and Python, /* */ for CSS. Extensions
@@ -50,12 +69,15 @@ is_ignored() {
 }
 
 has_header() {
+  local file="$1"
+  local holder
   local header
-  header="$(head -20 "$1")"
+  holder="$(license_holder "$file")"
+  header="$(head -20 "$file")"
   # Here-string, not `echo |`: grep -q exits on the first match, so echo can die of
   # SIGPIPE (141) and pipefail turns that into a false "no header", which makes
   # add_header prepend a second copyright block to a file that already has one.
-  grep -qF "$SPDX_REGEX" <<<"$header" && grep -qE "$COPYRIGHT_REGEX" <<<"$header"
+  grep -qF "$SPDX_REGEX" <<<"$header" && grep -qE "Copyright [0-9]{4} ${holder}" <<<"$header"
 }
 
 add_header() {
@@ -111,11 +133,7 @@ while IFS= read -r file; do
 
   has_header "$file" && continue
 
-  case "$ext" in
-    sh | py) add_header "$file" "$HASH_HEADER" ;;
-    css) add_header "$file" "$BLOCK_HEADER" ;;
-    *) add_header "$file" "$SLASH_HEADER" ;;
-  esac
+  add_header "$file" "$(header_for "$file")"
 
   ADDED=$((ADDED + 1))
   echo "  Added: $file"

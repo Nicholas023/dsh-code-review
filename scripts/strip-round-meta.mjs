@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/strip-round-meta.mjs —— 发布面轮次元数据剥离（一次性工具）。
  *

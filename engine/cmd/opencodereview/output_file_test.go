@@ -208,7 +208,7 @@ func TestResolveOutputWriter_MissingParent(t *testing.T) {
 
 func outputTempFiles(t *testing.T, dir string) []string {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(dir, ".ocr-out-*"))
+	matches, err := filepath.Glob(filepath.Join(dir, outputTempPrefix+"*"))
 	if err != nil {
 		t.Fatalf("glob output temp files: %v", err)
 	}

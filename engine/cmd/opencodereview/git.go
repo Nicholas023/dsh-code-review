@@ -30,7 +30,7 @@ func runGitCmdStdout(repoDir string, args ...string) ([]byte, error) {
 
 func getCommitMessage(repoDir, commit string) (string, error) {
 	// stdout only: CombinedOutput would prepend git warnings / GIT_TRACE
-	// lines to the commit message, which ocr review --commit then sends
+	// lines to the commit message, which codecheck review --commit then sends
 	// to the LLM as the review background.
 	out, err := runGitCmdStdout(repoDir, "log", "-1", "--format=%B", "--end-of-options", commit)
 	if err != nil {

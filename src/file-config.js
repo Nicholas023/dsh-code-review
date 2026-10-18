@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * file-config.js —— 插件自有配置文件层（运行真源，不依赖宿主 entry 配置回传）。
  *

@@ -89,39 +89,32 @@ func (r *SystemRule) UnmarshalJSON(data []byte) error {
 //go:embed system_rules.json rule_docs/*
 var rulesFS embed.FS
 
-// fixedReviewRules is the fixed preamble this fork (codecheck) prepends to every
-// embedded system rule. The project requires these three review focuses to
-// always apply, with zero configuration, regardless of language-specific rules:
-//  1. security & secret-exposure (including credentials/PII that would leak when
-//     a repository is published), 2. correctness bugs, 3. redundancy & scope creep.
-//
-// Keeping it here — one constant prepended in LoadDefault — makes it effective
-// for every rule path and fallback without touching the 54 language docs.
-const fixedReviewRules = `## Mandatory Review Rules (always apply)
+// fixedRulesDoc is the embedded path of the fork's fixed preamble. The preamble
+// is data, not code: it lives with the other rule docs in rule_docs/ so editing
+// the wording never requires touching Go. The project requires these three review
+// focuses to always apply, with zero configuration, regardless of language-specific
+// rules: 1. security & secret-exposure (including credentials/PII that would leak
+// when a repository is published), 2. correctness bugs, 3. redundancy & scope creep.
+const fixedRulesDoc = "rule_docs/fork_mandatory.md"
 
-Always review the diff against these three mandatory focuses, in addition to any
-language-specific rules below. Report every concrete finding with file path, line
-range, severity, and a concrete fix suggestion.
-
-1. Security & secrets exposure: flag hardcoded credentials, API keys, tokens,
-   passwords, or PII (phone numbers, ID-card numbers, emails); flag internal IPs,
-   internal domains and company-private information that would leak when the
-   repository is published; flag security vulnerabilities such as SQL injection,
-   XSS, path traversal, and missing auth/permission checks.
-2. Correctness bugs: logic errors, missing boundary conditions, improper exception
-   handling, race conditions in concurrent code, and resource leaks.
-3. Redundancy & scope creep: dead code, unused imports or references, duplicated
-   logic, and changes unrelated to what the diff claims to do.
-
-Write "N/A" for a focus only when it has nothing to flag for a specific file.`
+// loadFixedReviewRules reads the fixed preamble prepended to every embedded system
+// rule. Trailing newlines are trimmed so the prepended bytes do not depend on how
+// the doc file ends.
+func loadFixedReviewRules() (string, error) {
+	content, err := rulesFS.ReadFile(fixedRulesDoc)
+	if err != nil {
+		return "", fmt.Errorf("read fixed review rules %q: %w", fixedRulesDoc, err)
+	}
+	return strings.TrimRight(string(content), "\n"), nil
+}
 
 // prefixFixedRules returns text with the fixed review rules prepended. It accepts
 // empty text (a rule slot with no content) and returns only the fixed part then.
-func prefixFixedRules(text string) string {
+func prefixFixedRules(text, fixed string) string {
 	if text == "" {
-		return fixedReviewRules
+		return fixed
 	}
-	return fixedReviewRules + "\n\n---\n\n" + text
+	return fixed + "\n\n---\n\n" + text
 }
 
 // LoadDefault parses the embedded system_rules.json and resolves rule file references.
@@ -134,17 +127,21 @@ func LoadDefault() (*SystemRule, error) {
 	if err := json.Unmarshal(data, &rule); err != nil {
 		return nil, fmt.Errorf("unmarshal default system rules: %w", err)
 	}
+	fixed, err := loadFixedReviewRules()
+	if err != nil {
+		return nil, err
+	}
 	content, err := rulesFS.ReadFile("rule_docs/" + rule.DefaultRule)
 	if err != nil {
 		return nil, fmt.Errorf("read default rule file %q: %w", rule.DefaultRule, err)
 	}
-	rule.DefaultRule = prefixFixedRules(strings.TrimRight(string(content), "\n"))
+	rule.DefaultRule = prefixFixedRules(strings.TrimRight(string(content), "\n"), fixed)
 	for i := range rule.PathRules {
 		content, err := rulesFS.ReadFile("rule_docs/" + rule.PathRules[i].Rule)
 		if err != nil {
 			return nil, fmt.Errorf("read rule file %q for pattern %q: %w", rule.PathRules[i].Rule, rule.PathRules[i].Pattern, err)
 		}
-		rule.PathRules[i].Rule = prefixFixedRules(strings.TrimRight(string(content), "\n"))
+		rule.PathRules[i].Rule = prefixFixedRules(strings.TrimRight(string(content), "\n"), fixed)
 	}
 	return &rule, nil
 }

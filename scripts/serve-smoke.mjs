@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/serve-smoke.mjs —— 后台 serve 链路冒烟（回归护网）。
  *

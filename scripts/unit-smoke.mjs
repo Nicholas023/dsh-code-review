@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/unit-smoke.mjs —— 确定性模块单元自检（骨架期验证「可观察行为」）。
  *

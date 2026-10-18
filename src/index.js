@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * index.js —— dsh-code-review 插件主入口（Cordis bundle 形态的唯一 apply）。
  *

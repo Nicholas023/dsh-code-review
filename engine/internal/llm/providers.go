@@ -3,8 +3,6 @@
 
 package llm
 
-//go:generate go run ./gen -output ../../extensions/frontend/src/shared/providers.generated.ts -kotlin-output ../../extensions/idea/src/main/kotlin/com/alibaba/opencodereview/idea/services/ProviderNames.generated.kt
-
 import (
 	"sort"
 	"strings"
