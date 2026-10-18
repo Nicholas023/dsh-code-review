@@ -1830,6 +1830,9 @@ var specialCaseRuleDocs = map[string]bool{
 	// Backs the MATLAB/Objective-C ".m" content sniff in sniffer.Resolve;
 	// loaded via loadObjCRule, called from NewResolver.
 	"objc.md": true,
+	// The fork's fixed preamble, loaded via loadFixedReviewRules and prepended
+	// to every rule in LoadDefault; not referenced from system_rules.json.
+	"fork_mandatory.md": true,
 }
 
 // referencedRuleFiles reads the embedded system_rules.json and returns the set of
