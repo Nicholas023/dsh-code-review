@@ -3,7 +3,7 @@
   "manifestVersion": "0.15",
   "id": "code-review.engine",
   "name": "dsh-code-review",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "facets": {
     "host": {
       "entry": "./std-facet.js",

@@ -2,7 +2,7 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.1.2] - 2026-10-18
 
 ### 引擎 fork 治理（#2–#7 合并）
 
@@ -80,6 +80,7 @@
 - `result-text` 的 `elapsedSec` 非有限值回退 0，避免渲染 `NaN`。
 - 评审链路边界整改：并发配置传递、`--exclude` 单值语义、readBody 分片计数上限等（R8 剩余条目 / R9 评审）。
 
-[Unreleased]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Nicholas023/dsh-code-review/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Nicholas023/dsh-code-review/releases/tag/v0.1.0
