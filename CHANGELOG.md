@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-18
+
 ### DSH 0.2.1 适配
 
 面向 DeepSeek Harness **0.2.1**（npm `next` 线，如 `0.2.1-rc.2`；本插件原基线为 0.2.0）的适配。
@@ -69,5 +71,6 @@
 - `result-text` 的 `elapsedSec` 非有限值回退 0，避免渲染 `NaN`。
 - 评审链路边界整改：并发配置传递、`--exclude` 单值语义、readBody 分片计数上限等（R8 剩余条目 / R9 评审）。
 
-[Unreleased]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Nicholas023/dsh-code-review/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Nicholas023/dsh-code-review/releases/tag/v0.1.0
