@@ -81,7 +81,7 @@ var httpClientWithHeaderTimeout = func(timeout time.Duration) *http.Client {
 const defaultAnthropicMaxTokens = 8192
 
 func userAgent(provider string) string {
-	ua := "open-code-review/" + AppVersion
+	ua := "open-code-review-fork/" + AppVersion
 	if provider != "" {
 		ua += " | " + provider
 	}
