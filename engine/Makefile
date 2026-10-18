@@ -4,17 +4,23 @@
 	build-windows-amd64 build-windows-arm64 \
 	license-check license-add english-check
 
-BINARY_NAME := opencodereview
+# Fork naming: the binary is codecheck (open-code-review fork); the
+# upstream name opencodereview is gone. Controls the -o file name.
+BINARY_NAME := codecheck
 GO          := go
 DIST_DIR    := ./dist
 EXE         := $(if $(filter Windows_NT,$(OS)),.exe,)
 
-# Version info — use git tag if available, fallback to short commit hash
-GIT_TAG     := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "")
 GIT_COMMIT  := $(shell git rev-parse --short HEAD)
 BUILD_DATE  := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-VERSION     ?= $(if $(GIT_TAG),$(GIT_TAG),v0.0.0-$(GIT_COMMIT))
+# Version matches engine/scripts/build-fork.sh: root package.json is the only
+# source of truth, stamp is "<plugin version>+fork.<N>". Do not reintroduce a
+# git-tag dependency here; fork tags do not map to engine versions.
+REPO_ROOT   := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)
+PLUGIN_VERSION := $(shell sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$(REPO_ROOT)/package.json" | head -n1)
+FORK_N      := $(shell git rev-list --no-merges --count HEAD -- engine/)
+VERSION     ?= $(PLUGIN_VERSION)+fork.$(FORK_N)
 
 LD_FLAGS    := \
 	-X main.Version=$(VERSION) \
@@ -33,13 +39,11 @@ endef
 build:
 	$(GO) build -ldflags "$(LD_FLAGS)" -o $(DIST_DIR)/$(BINARY_NAME)$(EXE) ./cmd/opencodereview
 
-# No node_modules filter is needed for the docs site: pages/go.mod puts it in a
-# module of its own, so `go list ./...` skips that subtree entirely -- see that
-# file for why a module boundary is used instead of a per-command grep. Deleting
-# it brings pages/node_modules/flatted/golang back into this list.
-# The /extensions/ filter still earns its keep: extensions/vscode has no Go code
-# of ours, but its eslint dependency installs another copy of flatted's.
-PACKAGES := $(shell $(GO) list ./... | grep -v /extensions/)
+# No filters: the upstream pages/ (docs site) and extensions/ (IDE plugins)
+# trees were never committed to this fork, so `go list ./...` sees only engine
+# code. Re-add a module boundary or a grep filter here if a sibling Go tree
+# ever lands.
+PACKAGES := $(shell $(GO) list ./...)
 
 test:
 	LC_ALL=C $(GO) test -v -race -count=1 $(PACKAGES)
