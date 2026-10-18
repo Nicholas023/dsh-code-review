@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * exec-context.js —— 宿主工具调用上下文解析（会话工作目录等）。
  *

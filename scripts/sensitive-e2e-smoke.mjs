@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/sensitive-e2e-smoke.mjs —— 判据⑥「敏感文件点名层」实证：
  * 造一个含 .env 的测试仓库 → 插件全链路评审 → 报告出现点名项。

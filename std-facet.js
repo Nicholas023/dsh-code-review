@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * std-facet.js —— dsh-code-review 的 dsh-std 标准形态 host facet 入口。
  *

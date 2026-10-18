@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * report.js —— 评审报告落盘（结果形态：会话内清单 + 报告文件留档）。
  *

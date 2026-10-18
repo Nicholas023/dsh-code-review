@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/switch-model-e2e.mjs —— 判据⑤「切模型也通」实证：
  * 设置面板另选「非会话模型」（异构审查）后，插件管道真实评审跑通。

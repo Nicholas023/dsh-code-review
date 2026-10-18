@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * config.js —— dsh-code-review 配置模型：默认值、归一化、宿主 volatile 解包。
  *

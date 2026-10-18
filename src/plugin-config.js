@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * plugin-config.js —— 宿主设置页可编辑的插件配置 schema（DSH 0.2.0 设置机制）
  *

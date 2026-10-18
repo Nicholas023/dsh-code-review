@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/client-bundle-smoke.mjs —— 客户端模块（client.js）协议冒烟。
  *

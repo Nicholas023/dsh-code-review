@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * scripts/cordis-entry-smoke.mjs —— Cordis 入口（main 入口）冒烟自检。
  *

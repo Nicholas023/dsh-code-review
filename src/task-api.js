@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
 /**
  * src/task-api.js —— 后台评审任务的宿主可见面（「GUI 可见」落地之一）。
  *
