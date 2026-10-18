@@ -90,23 +90,27 @@ func newDelegateRepo(t *testing.T) delegateRepo {
 	return r
 }
 
+// delegateExampleCommands pins the canonical set of Git/cat invocations the
+// delegate skill documents for host agents: pager disabled, external diff and
+// textconv bypassed, colour off, and an optional --output redirection. The
+// upstream skill documents were removed with the rest of the extension
+// scaffolding, so the command set is inlined here to keep the behavioural
+// coverage (pager, external diff, textconv, colour, output, untracked read)
+// instead of being read from documents that no longer exist.
+var delegateExampleCommands = []string{
+	`git --no-pager diff --no-ext-diff --no-textconv --no-color HEAD -- "<path>"`,
+	`git --no-pager diff --no-ext-diff --no-textconv --no-color <merge_base>..<to> -- "<path>"`,
+	`git --no-pager show --no-ext-diff --no-textconv --no-color <commit> -- "<path>"`,
+	`git --no-pager diff --no-ext-diff --no-textconv --no-color --output="<absolute-diff-file>" HEAD -- "<path>"`,
+	`git --no-pager show "<ref>:<path>"`,
+	`git --no-pager log --oneline -- "<path>"`,
+	`git --no-pager blame --no-textconv -- "<path>"`,
+	`cat "<path>"`,
+}
+
 func delegateExamples(t *testing.T) []string {
 	t.Helper()
-	docs := []string{
-		"skills/open-code-review-delegate/SKILL.md",
-		"plugins/open-code-review/skills/open-code-review-delegate/SKILL.md",
-		"plugins/open-code-review/claude-code/commands/delegate-review.md",
-		"plugins/open-code-review/kimi-code/commands/delegate-review.md",
-	}
-	for _, locale := range []string{"en", "zh", "ja", "ko", "ru"} {
-		docs = append(docs, "pages/src/content/docs/"+locale+"/integrations/delegate.md")
-	}
-	// Go runs package tests from the package directory, including with -trimpath.
-	examples, err := readDelegateExamples(os.DirFS(filepath.Join("..", "..")), docs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return examples
+	return slices.Clone(delegateExampleCommands)
 }
 
 func readDelegateExamples(root fs.FS, docs []string) ([]string, error) {
@@ -375,6 +379,9 @@ func TestDelegatePagerProcess(t *testing.T) {
 }
 
 func TestDelegatePagerPTY(t *testing.T) {
+	if testing.Short() {
+		t.Skip("PTY-dependent; skipped in -short")
+	}
 	examples := delegateExamples(t)
 	unavailable := func(reason string) {
 		t.Helper()
