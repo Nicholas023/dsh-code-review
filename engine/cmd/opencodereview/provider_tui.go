@@ -2288,7 +2288,7 @@ func (m providerTUIModel) viewCustomProviderForm(s *strings.Builder) {
 					}
 				}
 				if m.cpAmbientProtocol() {
-					s.WriteString(tuiDimStyle.Render("    credentials come from the AWS chain; pin a region or profile with `ocr config set custom_providers."+m.cpNameInput.Value()+".aws_region <r>`") + "\n")
+					s.WriteString(tuiDimStyle.Render("    credentials come from the AWS chain; pin a region or profile with `"+commandName+" config set custom_providers."+m.cpNameInput.Value()+".aws_region <r>`") + "\n")
 				}
 			case cpStepBaseURL:
 				s.WriteString("    " + m.cpURLInput.View() + "\n")
@@ -2632,7 +2632,7 @@ var (
 			Foreground(lipgloss.Color("9"))
 )
 
-// --- Model-only TUI (for `ocr config model`) ---
+// --- Model-only TUI (for `codecheck config model`) ---
 
 type modelTUIConfig struct {
 	Provider       llm.Provider
@@ -2674,7 +2674,7 @@ type modelTUIModel struct {
 
 // newModelTUI builds a model-only TUI for tests. It has no config path or existing
 // config, so add/delete/persist operations are unavailable — use newModelTUIConfig
-// in production (ocr config model). IsCustom follows whether the provider is a preset.
+// in production (codecheck config model). IsCustom follows whether the provider is a preset.
 func newModelTUI(provider llm.Provider, currentModel string) modelTUIModel {
 	registryModels := append([]string(nil), provider.Models...)
 	isCustom := true

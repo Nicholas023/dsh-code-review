@@ -21,22 +21,22 @@ import (
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Manage configuration settings",
-	Long: `Configuration management.
+	Long: fmt.Sprintf(`Configuration management.
 
 Examples:
   # Provider setup (interactive)
-  ocr config provider
-  ocr config model
+  %[1]s config provider
+  %[1]s config model
 
   # Provider setup (non-interactive)
-  ocr config set provider anthropic
-  ocr config set model claude-opus-4-6
-  ocr config set providers.anthropic.api_key "$ANTHROPIC_API_KEY"
+  %[1]s config set provider anthropic
+  %[1]s config set model claude-opus-4-6
+  %[1]s config set providers.anthropic.api_key "$ANTHROPIC_API_KEY"
 
   # Custom provider
-  ocr config set provider my-gateway
-  ocr config set custom_providers.my-gateway.url https://gateway.internal.com/v1
-  ocr config set custom_providers.my-gateway.protocol openai`,
+  %[1]s config set provider my-gateway
+  %[1]s config set custom_providers.my-gateway.url https://gateway.internal.com/v1
+  %[1]s config set custom_providers.my-gateway.protocol openai`, commandName),
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
@@ -46,7 +46,7 @@ Examples:
 var configSetCmd = &cobra.Command{
 	Use:     "set <key> <value>",
 	Short:   "Set a configuration value",
-	Example: "  ocr config set llm.model claude-opus-4-6\n  ocr config set provider anthropic",
+	Example: fmt.Sprintf("  %[1]s config set llm.model claude-opus-4-6\n  %[1]s config set provider anthropic", commandName),
 	Args:    exactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runConfigSet(args[0], args[1])
@@ -57,7 +57,7 @@ var configUnsetCmd = &cobra.Command{
 	Use:     "unset <key>",
 	Short:   "Remove a configuration value",
 	Long:    "Remove a provider, custom_providers.<name>, or mcp_servers.<name>.",
-	Example: "  ocr config unset provider\n  ocr config unset custom_providers.my-provider\n  ocr config unset mcp_servers.github",
+	Example: fmt.Sprintf("  %[1]s config unset provider\n  %[1]s config unset custom_providers.my-provider\n  %[1]s config unset mcp_servers.github", commandName),
 	Args:    exactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runConfigUnset(args[0])
@@ -222,9 +222,9 @@ func legacyLLMShadowWarning(provider, key string) string {
 	if _, isPreset := llm.LookupProvider(provider); isPreset {
 		section = "providers"
 	}
-	return fmt.Sprintf("[codecheck] WARNING: provider %q is active and takes precedence over llm.* settings.\n"+
-		"[codecheck] Use 'ocr config set %s.%s.<field> <value>' to configure the active provider,\n"+
-		"[codecheck] or run 'ocr config unset provider' to disable provider-based config.\n", provider, section, provider)
+	return fmt.Sprintf("[codecheck] WARNING: provider %[2]q is active and takes precedence over llm.* settings.\n"+
+		"[codecheck] Use '%[1]s config set %[3]s.%[2]s.<field> <value>' to configure the active provider,\n"+
+		"[codecheck] or run '%[1]s config unset provider' to disable provider-based config.\n", commandName, provider, section)
 }
 
 func unsetCustomProvider(configPath, name string) error {
@@ -245,7 +245,7 @@ func unsetCustomProvider(configPath, name string) error {
 	fmt.Printf("Deleted custom provider %q.\n", name)
 	if wasActive {
 		fmt.Fprintf(os.Stderr, "[codecheck] WARNING: active provider was deleted; 'provider' and 'model' have been cleared.\n")
-		fmt.Fprintf(os.Stderr, "[codecheck] Run 'ocr config provider' to select a new provider.\n")
+		fmt.Fprintf(os.Stderr, "[codecheck] Run '%s config provider' to select a new provider.\n", commandName)
 	}
 	return nil
 }
@@ -727,7 +727,7 @@ func setConfigValue(cfg *Config, key, value string) error {
 		// and has nowhere here to put a region or a profile, so it is refused at
 		// the point of setting rather than accepted and ignored at resolve time.
 		if normalized == llm.ProtocolAnthropicBedrock {
-			return fmt.Errorf("llm.protocol cannot be %q: bedrock derives its host from aws_region and signs with the AWS credential chain, so it has no use for llm.url or llm.auth_token; run `ocr config set provider bedrock` instead", normalized)
+			return fmt.Errorf("llm.protocol cannot be %q: bedrock derives its host from aws_region and signs with the AWS credential chain, so it has no use for llm.url or llm.auth_token; run `%s config set provider bedrock` instead", normalized, commandName)
 		}
 		cfg.Llm.Protocol = normalized
 		// Mirror use_anthropic so older binaries that predate llm.protocol
@@ -1036,7 +1036,7 @@ func isAuxiliaryProviderField(field string) bool {
 func setCustomProviderField(cfg *Config, name, field, key, value string) error {
 	if _, exists := cfg.CustomProviders[name]; isAuxiliaryProviderField(field) && !exists {
 		providerKey := strings.TrimSuffix(key, "."+field)
-		return fmt.Errorf("provider %q is not configured; set a core field first (protocol is required for every custom provider):\n  ocr config set %s.protocol <protocol>", name, providerKey)
+		return fmt.Errorf("provider %q is not configured; set a core field first (protocol is required for every custom provider):\n  %s config set %s.protocol <protocol>", name, commandName, providerKey)
 	}
 	if cfg.CustomProviders == nil {
 		cfg.CustomProviders = make(map[string]ProviderEntry)

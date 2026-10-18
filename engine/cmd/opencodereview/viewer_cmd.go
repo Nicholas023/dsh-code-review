@@ -4,6 +4,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/alibaba/open-code-review/internal/viewer"
 	"github.com/spf13/cobra"
 )
@@ -21,10 +23,10 @@ var viewerCmd = &cobra.Command{
 	Short:   "Start the WebUI session viewer",
 	Long:    "Session history WebUI viewer.",
 	Args:    cobra.NoArgs,
-	Example: `  ocr viewer                     # start and open the browser
-  ocr viewer --addr :3000        # bind to all interfaces on port 3000
-  ocr viewer --open=never        # just print the URL
-  ocr viewer --open=always       # force it when auto declines (piped output, WSL)`,
+	Example: fmt.Sprintf(`  %[1]s viewer                     # start and open the browser
+  %[1]s viewer --addr :3000        # bind to all interfaces on port 3000
+  %[1]s viewer --open=never        # just print the URL
+  %[1]s viewer --open=always       # force it when auto declines (piped output, WSL)`, commandName),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := viewer.ValidateOpenMode(viewerOpts.open); err != nil {
 			return err

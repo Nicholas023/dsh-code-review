@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 //
 // See: https://github.com/alibaba/open-code-review/issues/890
 func TestArgCountErrors_AreActionable(t *testing.T) {
+	name := rootCmd.Name()
 	tests := []struct {
 		name string
 		args []string
@@ -26,11 +28,11 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			name: "config set with no args",
 			args: []string{"config", "set"},
 			want: []string{
-				`"ocr config set" requires exactly 2 argument(s) (<key> <value>)`,
-				"Usage:\n  ocr config set <key> <value>",
+				fmt.Sprintf(`"%[1]s config set" requires exactly 2 argument(s) (<key> <value>)`, name),
+				fmt.Sprintf("Usage:\n  %s config set <key> <value>", name),
 				"Example:",
-				"ocr config set provider anthropic",
-				"Run 'ocr config set --help' for more information.",
+				fmt.Sprintf("%s config set provider anthropic", name),
+				fmt.Sprintf("Run '%s config set --help' for more information.", name),
 			},
 		},
 		{
@@ -38,7 +40,7 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			args: []string{"config", "set", "provider"},
 			want: []string{
 				`requires exactly 2 argument(s) (<key> <value>)`,
-				"Usage:\n  ocr config set <key> <value>",
+				fmt.Sprintf("Usage:\n  %s config set <key> <value>", name),
 			},
 		},
 		{
@@ -48,7 +50,7 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			args: []string{"config", "set", "provider", "anthropic", "extra"},
 			want: []string{
 				`requires exactly 2 argument(s) (<key> <value>)`,
-				"Usage:\n  ocr config set <key> <value>",
+				fmt.Sprintf("Usage:\n  %s config set <key> <value>", name),
 			},
 		},
 		{
@@ -57,18 +59,18 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			name: "session export with too many args",
 			args: []string{"session", "export", "one", "two"},
 			want: []string{
-				`"ocr session export" accepts at most 1 argument(s)`,
-				"Usage:\n  ocr session export [flags] [session-id]",
+				fmt.Sprintf(`"%[1]s session export" accepts at most 1 argument(s)`, name),
+				fmt.Sprintf("Usage:\n  %s session export [flags] [session-id]", name),
 				"Example:",
-				"ocr session export -o review.html",
-				"Run 'ocr session export --help' for more information.",
+				fmt.Sprintf("%s session export -o review.html", name),
+				fmt.Sprintf("Run '%s session export --help' for more information.", name),
 			},
 		},
 		{
 			name: "config unset with no args",
 			args: []string{"config", "unset"},
 			want: []string{
-				`"ocr config unset" requires exactly 1 argument(s) (<key>)`,
+				fmt.Sprintf(`"%[1]s config unset" requires exactly 1 argument(s) (<key>)`, name),
 				"Example:",
 			},
 		},
@@ -76,8 +78,8 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			name: "rules check with no args",
 			args: []string{"rules", "check"},
 			want: []string{
-				`"ocr rules check" requires exactly 1 argument(s) (<file-path>)`,
-				"Usage:\n  ocr rules check",
+				fmt.Sprintf(`"%[1]s rules check" requires exactly 1 argument(s) (<file-path>)`, name),
+				fmt.Sprintf("Usage:\n  %s rules check", name),
 				"Example:",
 			},
 		},
@@ -85,21 +87,21 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			name: "session show with no args",
 			args: []string{"session", "show"},
 			want: []string{
-				`"ocr session show" requires exactly 1 argument(s) (<session-id>)`,
-				"Run 'ocr session show --help' for more information.",
+				fmt.Sprintf(`"%[1]s session show" requires exactly 1 argument(s) (<session-id>)`, name),
+				fmt.Sprintf("Run '%s session show --help' for more information.", name),
 			},
 		},
 		{
 			name: "session comments with no args",
 			args: []string{"session", "comments"},
-			want: []string{`"ocr session comments" requires exactly 1 argument(s) (<session-id>)`},
+			want: []string{fmt.Sprintf(`"%[1]s session comments" requires exactly 1 argument(s) (<session-id>)`, name)},
 		},
 		{
 			name: "delegate rule with no args",
 			args: []string{"delegate", "rule"},
 			want: []string{
-				`"ocr delegate rule" requires at least 1 argument(s) (<path...>)`,
-				"Usage:\n  ocr delegate rule",
+				fmt.Sprintf(`"%[1]s delegate rule" requires at least 1 argument(s) (<path...>)`, name),
+				fmt.Sprintf("Usage:\n  %s delegate rule", name),
 			},
 		},
 		{
@@ -108,7 +110,7 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			name: "completion with no args lists valid values",
 			args: []string{"completion"},
 			want: []string{
-				`"ocr completion" requires exactly 1 argument(s)`,
+				fmt.Sprintf(`"%[1]s completion" requires exactly 1 argument(s)`, name),
 				"Valid values: bash, zsh, fish, powershell",
 			},
 		},
@@ -117,22 +119,22 @@ func TestArgCountErrors_AreActionable(t *testing.T) {
 			// not satisfy the requirement.
 			name: "flags do not satisfy the positional requirement",
 			args: []string{"rules", "check", "--rule", "custom.json"},
-			want: []string{`"ocr rules check" requires exactly 1 argument(s) (<file-path>)`},
+			want: []string{fmt.Sprintf(`"%[1]s rules check" requires exactly 1 argument(s) (<file-path>)`, name)},
 		},
 		{
 			// Reached through an alias, the error names the canonical path. That
-			// matches what "ocr d rule --help" prints, so the two stay in step.
+			// matches what the delegate rule help prints, so the two stay in step.
 			name: "alias reports the canonical command path",
 			args: []string{"d", "rule"},
 			want: []string{
-				`"ocr delegate rule" requires at least 1 argument(s) (<path...>)`,
-				"Usage:\n  ocr delegate rule",
+				fmt.Sprintf(`"%[1]s delegate rule" requires at least 1 argument(s) (<path...>)`, name),
+				fmt.Sprintf("Usage:\n  %s delegate rule", name),
 			},
 		},
 		{
 			name: "sessions alias reports the canonical command path",
 			args: []string{"sessions", "show"},
-			want: []string{`"ocr session show" requires exactly 1 argument(s) (<session-id>)`},
+			want: []string{fmt.Sprintf(`"%[1]s session show" requires exactly 1 argument(s) (<session-id>)`, name)},
 		},
 	}
 

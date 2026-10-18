@@ -58,29 +58,29 @@ var scanCmd = &cobra.Command{
 	Short:   "Scan entire files (no diff required)",
 	Long:    "OpenCodeReview - Full-File Scan\n\nScan entire files for code review without requiring a diff.",
 	Args:    cobra.NoArgs,
-	Example: `  # Scan the entire repository
-  ocr scan
+	Example: fmt.Sprintf(`  # Scan the entire repository
+  %[1]s scan
 
   # Scan a single directory
-  ocr scan --path internal/agent
+  %[1]s scan --path internal/agent
 
   # Scan multiple files
-  ocr scan --path internal/agent/agent.go,internal/diff/scan.go
+  %[1]s scan --path internal/agent/agent.go,internal/diff/scan.go
 
   # Select a configured provider and model for this run only
-  ocr scan --provider openai --model gpt-5.4 --format json
+  %[1]s scan --provider openai --model gpt-5.4 --format json
 
   # Exclude generated files / fixtures
-  ocr scan --exclude '**/generated/*,**/testdata/*'
+  %[1]s scan --exclude '**/generated/*,**/testdata/*'
 
   # Preview which files would be scanned without calling the LLM
-  ocr scan --preview
+  %[1]s scan --preview
 
   # Skip the per-file PLAN_TASK pre-pass
-  ocr scan --no-plan
+  %[1]s scan --no-plan
 
   # Resume a previous full-file scan
-  ocr scan --resume <session-id>`,
+  %[1]s scan --resume <session-id>`, commandName),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateScanOptions(&scanOpts); err != nil {
 			return err
@@ -262,13 +262,13 @@ func loadScanResumeState(repoDir string, opts scanOptions, scanPaths []string) (
 	}
 	state, err := session.LoadResumeState(repoDir, opts.resume)
 	if err != nil {
-		return nil, fmt.Errorf("load resume session: %w (run 'ocr session list' to see available sessions)", err)
+		return nil, fmt.Errorf("load resume session: %w (run '%s session list' to see available sessions)", err, commandName)
 	}
 	if err := state.ValidateScanOptions(scanPaths); err != nil {
-		return nil, fmt.Errorf("%w (run 'ocr session list' to see available sessions)", err)
+		return nil, fmt.Errorf("%w (run '%s session list' to see available sessions)", err, commandName)
 	}
 	if state.CompletedCount() == 0 {
-		return nil, fmt.Errorf("resume session %q has no completed scan items (run 'ocr session list' to see available sessions)", opts.resume)
+		return nil, fmt.Errorf("resume session %q has no completed scan items (run '%s session list' to see available sessions)", opts.resume, commandName)
 	}
 	return state, nil
 }

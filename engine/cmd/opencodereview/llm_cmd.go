@@ -19,8 +19,8 @@ var llmCmd = &cobra.Command{
 	Use:   "llm",
 	Short: "LLM utility commands",
 	Long:  "LLM utility commands.",
-	Example: `  ocr llm test                   Verify LLM connectivity and configuration
-  ocr llm providers              List available built-in providers`,
+	Example: fmt.Sprintf(`  %[1]s llm test                   Verify LLM connectivity and configuration
+  %[1]s llm providers              List available built-in providers`, commandName),
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
@@ -87,7 +87,7 @@ func runLLMTestWithConfigPath(configPath string) error {
 	}
 
 	// No retry collector: llm test is a connectivity probe, not a review, and the
-	// retry report only describes ocr review.
+	// retry report only describes codecheck review.
 	llmClient := llm.NewLLMClient(ep, nil, nil)
 
 	messages := make([]llm.Message, 0, len(task.Messages))
@@ -199,7 +199,7 @@ func findTestToolCall(resp *llm.ChatResponse, name string) *llm.ToolCall {
 // unofferedToolResult answers a tool the test never offered. It reports the
 // call as not executed rather than inventing an outcome, and it has to say
 // something: an empty result is itself rejected by some providers.
-const unofferedToolResult = "Error: this tool is not available in ocr llm test and was not executed."
+var unofferedToolResult = fmt.Sprintf("Error: this tool is not available in %s llm test and was not executed.", commandName)
 
 // toolResultMessages answers every tool call in the turn. Both supported
 // protocols reject an assistant turn whose tool calls are not all answered, so
@@ -256,6 +256,6 @@ func runLLMProviders() {
 	if err := w.Flush(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to flush output: %v\n", err)
 	}
-	fmt.Println("\nUse 'ocr config provider' to configure a provider interactively.")
-	fmt.Println("Use 'ocr config set provider <name>' to switch providers non-interactively.")
+	fmt.Printf("\nUse '%s config provider' to configure a provider interactively.\n", commandName)
+	fmt.Printf("Use '%s config set provider <name>' to switch providers non-interactively.\n", commandName)
 }

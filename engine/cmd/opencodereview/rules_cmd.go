@@ -28,8 +28,8 @@ var rulesCheckCmd = &cobra.Command{
 	Use:   "check [flags] <file-path>",
 	Short: "Show which review rule applies to a given file path",
 	Long:  "Show which review rule applies to the given file path, including its source layer and matched pattern.",
-	Example: `  ocr rules check src/main/java/com/example/Foo.java
-  ocr rules check --rule custom.json src/main/resources/mapper/UserMapper.xml`,
+	Example: fmt.Sprintf(`  %[1]s rules check src/main/java/com/example/Foo.java
+  %[1]s rules check --rule custom.json src/main/resources/mapper/UserMapper.xml`, commandName),
 	Args: exactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRulesCheck(args[0])

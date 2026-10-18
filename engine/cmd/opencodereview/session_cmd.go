@@ -40,7 +40,7 @@ var sessionListCmd = &cobra.Command{
 	Use:     "list [flags]",
 	Aliases: []string{"ls"},
 	Short:   "List recent review sessions for the current repo",
-	Long:    "List review sessions previously persisted to ~/.opencodereview/sessions/.\nThe session id printed here can be passed to 'ocr review --resume <id>'.",
+	Long:    fmt.Sprintf("List review sessions previously persisted to ~/.opencodereview/sessions/.\nThe session id printed here can be passed to '%s review --resume <id>'.", commandName),
 	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSessionList()
@@ -68,7 +68,7 @@ var sessionCommentsCategory string
 var sessionCommentsCmd = &cobra.Command{
 	Use:               "comments [flags] <session-id>",
 	Short:             "Show the review comments recorded in one session",
-	Long:              "Print every review comment persisted in a session, formatted like 'ocr review' terminal output.\nUse --json for machine-readable output and --severity/--category to filter findings.",
+	Long:              fmt.Sprintf("Print every review comment persisted in a session, formatted like '%s review' terminal output.\nUse --json for machine-readable output and --severity/--category to filter findings.", commandName),
 	Args:              exactArgs(1),
 	ValidArgsFunction: completeSessionIDs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -108,8 +108,8 @@ var sessionExportCmd = &cobra.Command{
 		"repo is exported.\n\n" +
 		"The artifact embeds the reviewed source excerpts the session recorded; treat it\n" +
 		"with the same care as the repository itself.",
-	Example: "  ocr session export -o review.html\n" +
-		"  ocr session export 20250601-100000-abc123 -o review.html",
+	Example: fmt.Sprintf("  %[1]s session export -o review.html\n"+
+		"  %[1]s session export 20250601-100000-abc123 -o review.html", commandName),
 	Args:              maximumArgs(1),
 	ValidArgsFunction: completeSessionIDs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -132,9 +132,9 @@ var sessionRmCmd = &cobra.Command{
 		"The id is enough on its own, so this works from anywhere; --repo only narrows\n" +
 		"the search. An id saved for more than one repository is listed, not guessed at.\n\n" +
 		"The file cannot be recovered, so this confirms first unless --yes is given.",
-	Example: "  ocr session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b\n" +
-		"  ocr session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b --yes\n" +
-		"  ocr session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b --repo ~/work/my-project",
+	Example: fmt.Sprintf("  %[1]s session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b\n"+
+		"  %[1]s session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b --yes\n"+
+		"  %[1]s session rm 9f2c1b4a-7e35-4d61-b2f0-6c8a41d9e72b --repo ~/work/my-project", commandName),
 	Args:              exactArgs(1),
 	ValidArgsFunction: completeSessionIDsAnywhere,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -229,7 +229,7 @@ func init() {
 
 // runSessionExport writes one session's standalone HTML page to --output, or to
 // stdout when it is unset. The session id is optional because a *successful*
-// `ocr review` never prints one — review_cmd.go only reports it on failure — so
+// `codecheck review` never prints one — review_cmd.go only reports it on failure — so
 // requiring it would force every CI archive step through `--format json | jq`.
 func runSessionExport(sessionID string) (retErr error) {
 	resolvedRepo, err := resolveWorkingDirForSession(sessionExportRepoDir)
@@ -419,7 +419,7 @@ func describeCompareSide(sessionID string, s *session.Summary) sessionCompareSid
 	return side
 }
 
-// printSessionCompare writes to stdout, matching the other `ocr session`
+// printSessionCompare writes to stdout, matching the other `codecheck session`
 // subcommands.
 func printSessionCompare(beforeID, afterID string, before, after *session.Summary, result session.CompareResult) {
 	fmt.Printf("Comparing %s -> %s\n", beforeID, afterID)
@@ -492,7 +492,7 @@ func runSessionRmAnywhere(cmd *cobra.Command, sessionID string) error {
 	}
 	switch len(found) {
 	case 0:
-		return fmt.Errorf("no session %q is saved for any repository; run 'ocr session list' to see what is saved", sessionID)
+		return fmt.Errorf("no session %q is saved for any repository; run '%s session list' to see what is saved", sessionID, commandName)
 	case 1:
 	default:
 		var b strings.Builder
@@ -534,7 +534,7 @@ func runSessionRmAnywhere(cmd *cobra.Command, sessionID string) error {
 
 	if err := session.DeleteSessionAt(loc); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return fmt.Errorf("no session %q is saved for any repository; run 'ocr session list' to see what is saved", sessionID)
+			return fmt.Errorf("no session %q is saved for any repository; run '%s session list' to see what is saved", sessionID, commandName)
 		}
 		return err
 	}
@@ -559,14 +559,14 @@ func runSessionRm(cmd *cobra.Command, sessionID string) error {
 	summary, summaryErr := session.LoadSummary(repoDir, sessionID)
 	switch {
 	case summaryErr != nil && errors.Is(summaryErr, fs.ErrNotExist):
-		return fmt.Errorf("no session %q for this repository; run 'ocr session list' to see what is saved", sessionID)
+		return fmt.Errorf("no session %q for this repository; run '%s session list' to see what is saved", sessionID, commandName)
 	case summaryErr != nil:
 		return fmt.Errorf("cannot read session %q: %w", sessionID, summaryErr)
 	}
 
 	if err := session.CheckSessionRepo(repoDir, sessionID); err != nil {
 		if errors.Is(err, session.ErrSessionUnverifiable) {
-			return fmt.Errorf("%w\n\nRun 'ocr session rm %s' without --repo: the id locates the file on\nits own, so nothing has to be verified against a repository.", err, sessionID)
+			return fmt.Errorf("%w\n\nRun '%s session rm %s' without --repo: the id locates the file on\nits own, so nothing has to be verified against a repository.", err, commandName, sessionID)
 		}
 		if errors.Is(err, session.ErrSessionOtherRepo) {
 			return fmt.Errorf("%w\n\nTwo repository paths can share one session directory, so this session is\nvisible here but belongs elsewhere. Delete it from the repository that\nrecorded it.", err)
@@ -595,7 +595,7 @@ func runSessionRm(cmd *cobra.Command, sessionID string) error {
 
 	if err := session.DeleteSession(repoDir, sessionID); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return fmt.Errorf("no session %q for this repository; run 'ocr session list' to see what is saved", sessionID)
+			return fmt.Errorf("no session %q for this repository; run '%s session list' to see what is saved", sessionID, commandName)
 		}
 		return err
 	}
