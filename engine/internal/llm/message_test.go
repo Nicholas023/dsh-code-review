@@ -396,11 +396,11 @@ func TestDefaultAuthHeader(t *testing.T) {
 
 func TestUserAgent(t *testing.T) {
 	got := userAgent("anthropic")
-	if got != "open-code-review/dev | anthropic" {
+	if got != "open-code-review-fork/dev | anthropic" {
 		t.Errorf("userAgent(anthropic) = %q", got)
 	}
 	got2 := userAgent("")
-	if got2 != "open-code-review/dev" {
+	if got2 != "open-code-review-fork/dev" {
 		t.Errorf("userAgent('') = %q", got2)
 	}
 }

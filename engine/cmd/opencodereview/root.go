@@ -51,7 +51,16 @@ configurable LLM service, and generates review comments.`,
 	},
 }
 
+// rootCommandName resolves the root command's name at runtime. It is a
+// variable assigned in init() rather than a direct rootCmd.Name() call inside
+// versionString() because rootCmd's RunE prints the version, and versionString()
+// reads rootCmd's name: a direct reference forms a Go initialization cycle
+// ("rootCmd refers to printVersion -> versionString refers to rootCmd").
+// rootCmd remains the single source of truth for the command name.
+var rootCommandName func() string
+
 func init() {
+	rootCommandName = rootCmd.Name
 	rootCmd.SetFlagErrorFunc(flagErrorWithSuggestion)
 	rootCmd.Flags().BoolP("version", "V", false, "version for ocr")
 	addColorFlags(rootCmd)
@@ -82,14 +91,19 @@ func commandNeedsGit(cmd *cobra.Command) bool {
 }
 
 func versionString() string {
-	s := fmt.Sprintf("open-code-review %s", Version)
+	// Command name comes from the single source of truth (rootCmd.Name(), via
+	// rootCommandName) so a future rename cannot drift from what the binary
+	// actually announces.
+	s := fmt.Sprintf("%s %s", rootCommandName(), Version)
 	if GitCommit != "" {
-		s += fmt.Sprintf(" (%s)", GitCommit)
+		s += fmt.Sprintf(" (g%s)", GitCommit)
 	}
 	s += fmt.Sprintf(" %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	if BuildDate != "" {
-		s += fmt.Sprintf("built at: %s\n", BuildDate)
+		s += fmt.Sprintf("built at %s\n", BuildDate)
 	}
-	s += "https://github.com/alibaba/open-code-review\n"
+	// Attribution is a legal obligation under Apache-2.0 §4 and is kept even
+	// though this fork no longer tracks upstream snapshots.
+	s += "fork of open-code-review (Apache-2.0) — https://github.com/alibaba/open-code-review\n"
 	return s
 }
