@@ -112,6 +112,7 @@ npm run selfcheck                    # unit + smoke 全量
 - 上游项目：[alibaba/open-code-review](https://github.com/alibaba/open-code-review)
 - 上游版权：Copyright 2026 alibaba/open-code-review Contributors
 - 上游许可：Apache License 2.0（完整文本见 `engine/LICENSE`）
+- fork 说明、构建方法与版本口径见 `engine/FORK_NOTES.md`（`engine/README.md` 同目录，含上游改造点清单）
 - 修改声明：本仓库对引擎源码（`engine/`）做了 fork 改造（Windows 子进程隐藏窗口、
   跨平台进程树终止、敏感内容排除、R1–R8 评审整改等）；引擎每个源文件头保留
   上游 `SPDX-License-Identifier: Apache-2.0` 与版权声明。

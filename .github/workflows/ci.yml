@@ -47,6 +47,13 @@ jobs:
       - name: go vet
         working-directory: engine
         run: go vet ./...
+      - name: go test -short
+        working-directory: engine
+        shell: bash
+        run: go test -short ./...
+      - name: go build
+        working-directory: engine
+        run: go build ./...
 
   # ② 冒烟矩阵（隔离环境，不联网、不触付费通道）。
   smoke:
