@@ -40,14 +40,14 @@ var delegateCmd = &cobra.Command{
 	Long: `OpenCodeReview - Delegation Mode
 
 Output review spec for host-agent delegation (no LLM required).`,
-	Example: `  # Preview which files will be reviewed
-  ocr delegate preview --from main --to feature
+	Example: fmt.Sprintf(`  # Preview which files will be reviewed
+  %[1]s delegate preview --from main --to feature
 
   # Preview workspace changes
-  ocr delegate preview
+  %[1]s delegate preview
 
   # Get rules for multiple files (grouped by content)
-  ocr delegate rule internal/agent/agent.go internal/llm/client.go`,
+  %[1]s delegate rule internal/agent/agent.go internal/llm/client.go`, commandName),
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()

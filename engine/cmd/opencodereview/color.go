@@ -31,7 +31,7 @@ var (
 
 // addColorFlags registers the color control. It is persistent on the root
 // command so every subcommand inherits identical behavior, and so
-// `ocr --color=never review` and `ocr review --color=never` are equivalent.
+// `codecheck --color=never review` and `codecheck review --color=never` are equivalent.
 func addColorFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().StringVar(&colorMode, "color", colorModeAuto,
 		"when to emit ANSI color: auto (only when stdout is a terminal), always, or never")

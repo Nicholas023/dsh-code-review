@@ -61,39 +61,39 @@ var reviewCmd = &cobra.Command{
 	Short:   "Start a diff-based code review",
 	Long:    "OpenCodeReview - AI-Powered Code Review CLI\n\nStart a diff-based code review using a configurable LLM.",
 	Args:    cobra.NoArgs,
-	Example: `  # Review staged + unstaged + untracked changes in current workspace
-  ocr review
+	Example: fmt.Sprintf(`  # Review staged + unstaged + untracked changes in current workspace
+  %[1]s review
 
   # Review a branch against its base (merge-base mode)
-  ocr review --from master --to dev-ref
+  %[1]s review --from master --to dev-ref
 
   # Review a specific commit
-  ocr review --commit abc123
-  ocr review -c abc123
+  %[1]s review --commit abc123
+  %[1]s review -c abc123
 
   # Resume a previous range review
-  ocr review --from master --to dev-ref --resume <session-id>
+  %[1]s review --from master --to dev-ref --resume <session-id>
 
   # Output JSON format
-  ocr review --format json
-  ocr review -f json
+  %[1]s review --format json
+  %[1]s review -f json
 
   # Select a configured provider and model for this run only
-  ocr review --provider anthropic --model claude-opus-4-6 --format json
+  %[1]s review --provider anthropic --model claude-opus-4-6 --format json
 
   # Agent mode (summary only, no progress lines)
-  ocr review --audience agent
+  %[1]s review --audience agent
 
   # Preview which files will be reviewed
-  ocr review --preview
-  ocr review -c abc123 -p
+  %[1]s review --preview
+  %[1]s review -c abc123 -p
 
   # Exclude generated files / fixtures
-  ocr review --exclude '**/generated/*,**/testdata/*'
+  %[1]s review --exclude '**/generated/*,**/testdata/*'
 
   # Provide requirement/business context inline or from a Markdown file
-  ocr review --background "Adding rate limiting to the login API"
-  ocr review --background-file ./docs/requirements.md`,
+  %[1]s review --background "Adding rate limiting to the login API"
+  %[1]s review --background-file ./docs/requirements.md`, commandName),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateReviewOptions(&reviewOpts); err != nil {
 			return err
@@ -366,10 +366,10 @@ func loadReviewResumeState(repoDir string, opts reviewOptions) (*session.ResumeS
 	}
 	state, err := session.LoadReviewResumeState(repoDir, opts.resume)
 	if err != nil {
-		return nil, fmt.Errorf("load resume session: %w (run 'ocr session list' to see available sessions)", err)
+		return nil, fmt.Errorf("load resume session: %w (run '%s session list' to see available sessions)", err, commandName)
 	}
 	if err := state.ValidateOptions(current); err != nil {
-		return nil, fmt.Errorf("%w (run 'ocr session list' to see available sessions)", err)
+		return nil, fmt.Errorf("%w (run '%s session list' to see available sessions)", err, commandName)
 	}
 	// A parent whose every item failed is deliberately allowed through: it has a
 	// verifiable manifest, so its whole selected set can simply be re-dispatched.
@@ -450,7 +450,7 @@ func reviewModeFromOptions(opts reviewOptions) string {
 	return session.ReviewModeWorkspace
 }
 
-// resolveRepoDir resolves the repo dir for `ocr rules check`. It delegates to
+// resolveRepoDir resolves the repo dir for `codecheck rules check`. It delegates to
 // resolveWorkingDir(requireGit=true) so it anchors at the git top-level just
 // like the review path — keeping rule resolution consistent when run from a
 // monorepo subdirectory (#287).

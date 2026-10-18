@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alibaba/open-code-review/internal/buildinfo"
 	"github.com/alibaba/open-code-review/internal/model"
 )
 
@@ -127,7 +128,7 @@ func (jw *jsonlWriter) open() error {
 func (jw *jsonlWriter) writeRecordLocked(rec map[string]any) {
 	data, err := json.Marshal(rec)
 	if err != nil {
-		fmt.Printf("[ocr session] failed to marshal record: %v\n", err)
+		fmt.Printf("[%s session] failed to marshal record: %v\n", buildinfo.CommandName, err)
 		return
 	}
 	jw.writer.Write(data)

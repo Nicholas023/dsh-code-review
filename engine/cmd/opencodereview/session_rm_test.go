@@ -123,8 +123,8 @@ func TestSessionRm_UnknownIDExplainsHowToList(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an unknown session id")
 	}
-	if !strings.Contains(err.Error(), "ocr session list") {
-		t.Errorf("error should point at 'ocr session list', got %q", err.Error())
+	if !strings.Contains(err.Error(), commandName+" session list") {
+		t.Errorf("error should point at '%s session list', got %q", commandName, err.Error())
 	}
 }
 
@@ -148,7 +148,7 @@ func TestSessionRm_RejectsTraversalIDsBeforeTouchingTheFilesystem(t *testing.T) 
 			if err == nil {
 				t.Fatalf("runSessionRm(%q) returned no error", id)
 			}
-			if strings.Contains(err.Error(), "ocr session list") {
+			if strings.Contains(err.Error(), commandName+" session list") {
 				t.Errorf("runSessionRm(%q) reported a missing session; an invalid id must be refused as invalid", id)
 			}
 		})
@@ -314,7 +314,7 @@ func TestSessionRm_PromptMatchesTheListFormatting(t *testing.T) {
 	}
 	got := out.String()
 	if strings.Contains(got, "T10:00:00Z") {
-		t.Errorf("prompt used RFC3339; 'ocr session list' shows a local timestamp: %q", got)
+		t.Errorf("prompt used RFC3339; '%s session list' shows a local timestamp: %q", commandName, got)
 	}
 	for _, want := range []string{"repo:", "branch:", "started:", "files:", "comments:"} {
 		if !strings.Contains(got, want) {
@@ -420,7 +420,7 @@ func TestSessionRm_UnknownIDAnywhereSaysSoWithoutPrompting(t *testing.T) {
 	if err == nil {
 		t.Fatal("an id that is saved nowhere must be an error")
 	}
-	if !strings.Contains(err.Error(), "ocr session list") {
+	if !strings.Contains(err.Error(), commandName+" session list") {
 		t.Errorf("error should point at the listing command, got %q", err.Error())
 	}
 	if strings.Contains(out, "Delete session") {
@@ -438,7 +438,7 @@ func TestSessionRm_TraversalIDIsRefusedBeforeSearchingEveryRepository(t *testing
 			t.Errorf("FindSessionsByID(%q) must be refused", id)
 		}
 		if _, err := runSessionRmForTest(t, "", id, "", true); err == nil {
-			t.Errorf("ocr session rm %q must be refused", id)
+			t.Errorf("%s session rm %q must be refused", commandName, id)
 		}
 	}
 }
