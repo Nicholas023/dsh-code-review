@@ -58,10 +58,17 @@ stored-credentials-precedence 口径一致；key 只进子进程环境，**不�
 
 ## 安装（热装，免重启）
 
-1. 把本包目录 junction 进 profile 的 node_modules（或以 npm 方式安装依赖）：
+> ⚠️ **npm 同名包警告**：npm 上的 [`dsh-code-review`](https://www.npmjs.com/package/dsh-code-review)
+> 属于另一个活跃项目（dsh-electron 生态的代码审查模式 agent preset），**不是本插件**。
+> `npm install dsh-code-review` 装到的是对方的包，无法使用。本插件**不走 npm 分发**——
+> 安装请按以下步骤从 GitHub Release 获取。
+
+1. 从 [GitHub Releases](https://github.com/Nicholas023/dsh-code-review/releases) 下载最新版本，
+   将插件目录 junction 进 profile 的 node_modules：
    ```powershell
-   node scripts/link-deps.mjs        # 开发期：连接本机 schema 依赖
-   npm install                       # 发布安装：正式依赖
+   # 假设解压到 D:\DSH-Files-v2\02-DSH开发\代码审查插件\dsh-code-review
+   node scripts/link-deps.mjs        # 连接开发期依赖（junction，幂等）
+   npm install                        # 仅安装本仓库声明的依赖（js-yaml 等），不会从 npm 装本插件
    ```
 2. 经 DSH 插件管理页把本包加入 profile（读取 `cordis.patch.yml` 注入组合树），
    或手工在 profile 的 `cordis.patch.yml` 追加：
@@ -70,8 +77,8 @@ stored-credentials-precedence 口径一致；key 只进子进程环境，**不�
        - id: dsh-code-review
          name: 'dsh-code-review'
    ```
-3. 引擎 codecheck：把编译产物放到插件包 `bin/codecheck(.exe)`，或经工具
-   `code_review_set_config` 的 `engine_bin` 指定绝对路径。
+3. 引擎 codecheck：从 Release 下载编译产物放到插件包 `bin/codecheck(.exe)`，
+   或经工具 `code_review_set_config` 的 `engine_bin` 指定绝对路径。
 
 ## 开发
 
