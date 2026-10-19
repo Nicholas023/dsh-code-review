@@ -184,6 +184,10 @@ function commandOnPath(cmd) {
  * @param {boolean} [opts.concurrencyEnabled] 并发评审开关。
  *   false（默认）= 单线顺序审查；true = 并行审查（token 消耗增加，用户侧成本控制）。
  * @param {number} [opts.concurrency] 并发广度（1..32，默认 8）；仅开关开启时生效。
+ * @param {number} [opts.timeoutMinutes] 引擎 --timeout（并发任务总预算，分钟）；
+ *   ≥0 时透传（0 = unlimited，引擎 --timeout 0 语义）；
+ *   不传或非有限/负数 → 不加 --timeout（引擎默认 15 分钟）；
+ *   正值不足 1 分钟按 1 分钟计（防亚分钟值 round 成 0 误开 unlimited）。
  * @returns {string[]} 参数字符串数组。
  */
 export function buildReviewArgs(opts) {
@@ -222,6 +226,14 @@ export function buildReviewArgs(opts) {
     concurrency = CONCURRENCY_MIN; // 单线
   }
   args.push('--concurrency', String(concurrency));
+  // 引擎 --timeout：并发任务总预算（分钟），0=unlimited，引擎默认 15 分钟。
+  // 数据契约：非有限（NaN/Infinity）或负数不加该 flag（引擎回退自身默认 15 分钟）；
+  // 正值不足 1 分钟按 1 分钟计（防 0.167min round 成 0 误开 unlimited，与用户意图相反）。
+  if (typeof opts.timeoutMinutes === 'number' && Number.isFinite(opts.timeoutMinutes) && opts.timeoutMinutes >= 0) {
+    // 显式 0 保留 unlimited 语义；其余正值至少 1 分钟。
+    const minutes = opts.timeoutMinutes === 0 ? 0 : Math.max(1, Math.round(opts.timeoutMinutes));
+    args.push('--timeout', String(minutes));
+  }
   // 会话内返回：agent 受众 = 仅摘要（无进度噪音，干净短输出）。
   args.push('--audience', 'agent');
   return args;

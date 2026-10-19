@@ -106,7 +106,7 @@ function taskFromArgs(args, cfg) {
 }
 
 /**
- * 后台投递一次评审（serve 编排执行，不阻塞前台、不受会话超时约束）。
+ * 后台投递一次评审（serve 编排执行，引擎 --timeout 默认 15 分钟，插件进程级兜底 6 小时）。
  *
  * @param {object} args 工具参数。
  * @param {object} cfg  归一化配置。
@@ -163,7 +163,7 @@ async function dispatchReview(args, cfg, opts = {}) {
       `- 命令: codecheck ${task.command}${task.repoPath ? ` --repo ${task.repoPath}` : ''}`,
       `- 任务簿: ${taskPath}`,
       '',
-      '评审在后台 serve 中执行，**不阻塞会话、不受超时限制**（慢模型也没关系）。',
+      '评审超时由引擎 --timeout 控制（默认 15 分钟），插件进程级兜底 6 小时。',
       '随时用 code_review_status 工具查状态取结果；完成后报告自动落盘留档。',
     ].join('\n'),
   };
@@ -228,7 +228,7 @@ export function createReviewTool(ctx, getConfig) {
       '对代码仓库执行智能代码审查：调用引擎 codecheck（open-code-review 的 fork）读取 git diff 或做全目录扫描，',
       '用评审模型按三个固定视角挑刺：① 安全与脱敏（硬编码密钥/口令/PII/内部信息泄露 + 安全漏洞）；',
       '② 找 bug（逻辑/边界/异常/并发）；③ 冗余与任务无关代码（scope creep/死代码）。',
-      '【后台执行】发起后立即返回任务 id（任务卡），评审由后台 serve 异步执行：不阻塞会话、不受会话超时限制、慢模型也没关系。',
+      '【后台执行】发起后立即返回任务 id（任务卡），评审由后台 serve 异步执行：引擎 --timeout 默认 15 分钟，插件进程级兜底 6 小时。',
       '随后用 code_review_status 工具查状态取结果；完成后报告自动落盘留档（会话内仍可拿完整问题清单）。',
       '参数：repo_path（仓库路径，省略时尝试取会话工作目录，取不到任务失败并提示）；mode（review 模式：uncommitted 工作区未提交 / branch 分支对比 / commit 指定提交；或 scan 全目录扫描）；',
       'base_ref（branch 模式的对比基线，默认 main）；head_ref（branch 模式的目标分支）；commit（commit 模式的提交号）；',
