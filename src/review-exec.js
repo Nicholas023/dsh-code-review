@@ -156,6 +156,12 @@ async function executeReviewInner(task) {
     excludePaths: task.excludePaths,
     concurrencyEnabled: cfg.concurrency_enabled === true,
     concurrency: cfg.concurrency,
+    // 引擎 --timeout：从进程级兜底 review_timeout_ms 折算为分钟（issue #9）。
+    // 有限且 ≥0 → 折算分钟透传（0 → 0=unlimited，引擎 --timeout 0 语义）；
+    // 非有限/负数 → undefined（不加该 flag，引擎回退默认 15 分钟）。
+    timeoutMinutes: Number.isFinite(cfg.review_timeout_ms) && cfg.review_timeout_ms >= 0
+      ? cfg.review_timeout_ms / 60_000
+      : undefined,
   });
 
   // 4. 评审模型解析 + key 注入（零落盘：key 只进子进程 env）。

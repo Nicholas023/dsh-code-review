@@ -107,6 +107,21 @@ t('并发关闭/缺省：一律显式 --concurrency 1（防引擎默认 8 漂移
   assert.equal(absent[absent.indexOf('--concurrency') + 1], '1');
 });
 
+t('timeoutMinutes：传 360 → --timeout 360', () => {
+  const args = buildReviewArgs({ command: 'scan', repoPath: '/repo', timeoutMinutes: 360 });
+  assert.ok(args.includes('--timeout'), '应含 --timeout，实际：' + args.join(' '));
+  assert.equal(args[args.indexOf('--timeout') + 1], '360');
+});
+t('timeoutMinutes：不传 → 无 --timeout（引擎默认 15 分钟）', () => {
+  const args = buildReviewArgs({ command: 'scan', repoPath: '/repo' });
+  assert.ok(!args.includes('--timeout'), '不应含 --timeout，实际：' + args.join(' '));
+});
+t('timeoutMinutes：传 0 → --timeout 0（unlimited）', () => {
+  const args = buildReviewArgs({ command: 'scan', repoPath: '/repo', timeoutMinutes: 0 });
+  assert.ok(args.includes('--timeout'), '应含 --timeout，实际：' + args.join(' '));
+  assert.equal(args[args.indexOf('--timeout') + 1], '0');
+});
+
 /* ---------- 2. 敏感路径 ---------- */
 t('敏感命中：.env / .env.production', () => {
   assert.equal(isSensitivePath('.env'), true);

@@ -184,6 +184,8 @@ function commandOnPath(cmd) {
  * @param {boolean} [opts.concurrencyEnabled] 并发评审开关。
  *   false（默认）= 单线顺序审查；true = 并行审查（token 消耗增加，用户侧成本控制）。
  * @param {number} [opts.concurrency] 并发广度（1..32，默认 8）；仅开关开启时生效。
+ * @param {number} [opts.timeoutMinutes] 引擎 --timeout（并发任务总预算，分钟）；
+ *   0 = unlimited；不传或非负数以外 → 不加 --timeout（引擎默认 15 分钟）。
  * @returns {string[]} 参数字符串数组。
  */
 export function buildReviewArgs(opts) {
@@ -222,6 +224,11 @@ export function buildReviewArgs(opts) {
     concurrency = CONCURRENCY_MIN; // 单线
   }
   args.push('--concurrency', String(concurrency));
+  // 引擎 --timeout：并发任务总预算（分钟），0=unlimited，引擎默认 15 分钟。
+  // 仅在显式传入非负数时透传；否则不加该 flag（引擎回退自身默认 15 分钟）。
+  if (typeof opts.timeoutMinutes === 'number' && opts.timeoutMinutes >= 0) {
+    args.push('--timeout', String(Math.round(opts.timeoutMinutes)));
+  }
   // 会话内返回：agent 受众 = 仅摘要（无进度噪音，干净短输出）。
   args.push('--audience', 'agent');
   return args;
