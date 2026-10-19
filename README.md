@@ -85,7 +85,7 @@ stored-credentials-precedence 口径一致；key 只进子进程环境，**不�
 ```powershell
 node scripts/link-deps.mjs           # 连接开发期依赖（junction，幂等）
 npm run check                        # 全部 js 语法检查
-npm run unit                         # 确定性模块自检（28 项，不联网）
+npm run unit                         # 确定性模块自检，不联网
 npm run smoke                        # Cordis 入口冒烟自检（挂载前提验证）
 npm run e2e-engine                   # 引擎侧端到端（真实 DeepSeek 官方评审，需本机凭据）
 npm run e2e-plugin                   # 插件管道端到端（model-provider→credentials→runner）
