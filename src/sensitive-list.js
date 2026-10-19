@@ -30,7 +30,14 @@ export const SENSITIVE_PATH_PATTERNS = [
   /(^|\/)\.[^/]*key[^/]*$/i,
   /(^|\/)\.[^/]*secret/i,
   /(^|\/)\.env(\.[^/]+)?$/i, // .env / .env.production 等
-  /(^|\/)(.*\.)?(pem|p12|pfx|keystore|jks|cert|crt|key|kdbx|otpkey)(\.|$)/i,
+  // 凭据扩展名必须作为「独立扩展名」出现（my.key、cert.pfx、server.crt.bak 等）：
+  // 敏感词前必须由点号分隔（[^/]*\.），后跟行尾或再一个点（如 .key.bak 的 .bak）。
+  // 旧正则的 (.*\.)? 可整体不参与匹配，导致 key.js / cert.ts / pem.js 中敏感词
+  // 后跟源码扩展名的点即满足 (\.|$)——src/key.js、src/key.ts 等合法源码被误判为
+  // 敏感文件，噪声稀释真正凭据命中的信号（issue #11）。修后路径段内嵌的
+  // key/cert/pem（sessionkey.go、keycmd.go 等）也不再命中；id_rsa/credentials/.env
+  // 等由各自独立规则覆盖，不受此行影响。
+  /(^|\/)[^/]*\.(pem|p12|pfx|keystore|jks|cert|crt|key|kdbx|otpkey)(\.|$)/i,
   /(^|\/)credentials[^/]*$/i,
   // token 模式收紧（形态：独立词段 token(s) + **凭据类扩展名或路径结尾**）——
   // 原 `.*token[^/]*$` 命中路径任意位置含 "token" 的文件（src/tokenizer.js、
