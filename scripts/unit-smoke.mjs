@@ -121,6 +121,16 @@ t('timeoutMinutes：传 0 → --timeout 0（unlimited）', () => {
   assert.ok(args.includes('--timeout'), '应含 --timeout，实际：' + args.join(' '));
   assert.equal(args[args.indexOf('--timeout') + 1], '0');
 });
+t('timeoutMinutes：传负数 → 无 --timeout（引擎默认 15 分钟）', () => {
+  const args = buildReviewArgs({ command: 'scan', repoPath: '/repo', timeoutMinutes: -1 });
+  assert.ok(!args.includes('--timeout'), '不应含 --timeout，实际：' + args.join(' '));
+});
+t('timeoutMinutes：传 NaN / Infinity → 无 --timeout（引擎默认 15 分钟）', () => {
+  const nanArgs = buildReviewArgs({ command: 'scan', repoPath: '/repo', timeoutMinutes: NaN });
+  assert.ok(!nanArgs.includes('--timeout'), 'NaN 不应含 --timeout，实际：' + nanArgs.join(' '));
+  const infArgs = buildReviewArgs({ command: 'scan', repoPath: '/repo', timeoutMinutes: Infinity });
+  assert.ok(!infArgs.includes('--timeout'), 'Infinity 不应含 --timeout，实际：' + infArgs.join(' '));
+});
 
 /* ---------- 2. 敏感路径 ---------- */
 t('敏感命中：.env / .env.production', () => {

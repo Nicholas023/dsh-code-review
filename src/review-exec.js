@@ -157,8 +157,9 @@ async function executeReviewInner(task) {
     concurrencyEnabled: cfg.concurrency_enabled === true,
     concurrency: cfg.concurrency,
     // 引擎 --timeout：从进程级兜底 review_timeout_ms 折算为分钟（issue #9）。
-    // 有限且 ≥0 → 折算分钟透传（0 → 0=unlimited，引擎 --timeout 0 语义）；
-    // 非有限/负数 → undefined（不加该 flag，引擎回退默认 15 分钟）。
+    // 经 normalizeConfig 后 review_timeout_ms ∈ [1, REVIEW_TIMEOUT_MAX]（见 config.js 钳制），
+    // 此处 ≥0 分支为防御性守卫（0 值正常流程走不到）：非有限/负数 → undefined，
+    // 不加 --timeout flag，引擎回退默认 15 分钟。
     timeoutMinutes: Number.isFinite(cfg.review_timeout_ms) && cfg.review_timeout_ms >= 0
       ? cfg.review_timeout_ms / 60_000
       : undefined,
