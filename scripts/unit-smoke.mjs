@@ -77,14 +77,22 @@ t('review/commit + 有效 SHA：正常传参（issue #10 回归）', () => {
   assert.ok(args.includes('--commit'));
   assert.equal(args[args.indexOf('--commit') + 1], 'deadbeef');
 });
-t('review/commit 缺 SHA：抛错 fail-closed（issue #10）', () => {
+t('review/commit 无 SHA（undefined）：抛错 fail-closed（issue #10）', () => {
   assert.throws(
     () => buildReviewArgs({ command: 'review', mode: 'commit' }),
     { message: /commit 模式必须指定 commit SHA/ },
   );
+});
+t('review/commit 无 SHA（空串/纯空白）：抛错 fail-closed（issue #10）', () => {
   // commit 为空串同样抛错。
   assert.throws(
     () => buildReviewArgs({ command: 'review', mode: 'commit', commit: '' }),
+    { message: /commit 模式必须指定 commit SHA/ },
+  );
+  // 纯空白串是 truthy，单查 !opts.commit 拦不住（评审 finding 1）——
+  // 权威层用 trim 判定后一样抛错，绝不把 --commit '   ' 传给引擎。
+  assert.throws(
+    () => buildReviewArgs({ command: 'review', mode: 'commit', commit: '   ' }),
     { message: /commit 模式必须指定 commit SHA/ },
   );
 });
