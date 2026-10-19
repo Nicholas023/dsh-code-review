@@ -216,6 +216,29 @@ t('resolveDshRoot：优先 DSH_HOME，未设置回退 homedir()/.dsh（issue #13
   assert.equal(resolveDshRoot(), expectDefault);
 });
 
+t('task-book：REVIEW_HOME 回退分支跟随 DSH_HOME，未设置回退 ~/.dsh/dsh-code-review（issue #13）', async () => {
+  // REVIEW_HOME 是模块顶层常量、import 时求值：用带 query 的独立 URL 重新求值
+  // 模块实例（不同 URL = 不命中既有实例缓存），config.js 的 resolveDshRoot 是
+  // 函数引用、默认参数调用时才读 process.env，故能观察到当前环境。
+  const prevReview = process.env.DSH_REVIEW_HOME;
+  const prevDsh = process.env.DSH_HOME;
+  try {
+    delete process.env.DSH_REVIEW_HOME; // 只测回退分支，DSH_REVIEW_HOME 优先逻辑由既有用例覆盖
+    // 场景 1：设置自定义 DSH_HOME → REVIEW_HOME = <DSH_HOME>/dsh-code-review
+    process.env.DSH_HOME = 'D:/dsh-home';
+    const tb1 = await import(new URL('../src/task-book.js?case=dshhome', import.meta.url).href);
+    assert.equal(tb1.REVIEW_HOME, join('D:/dsh-home', 'dsh-code-review'));
+    // 场景 2：未设置 DSH_HOME → 回退 homedir()/.dsh/dsh-code-review（默认布局）
+    delete process.env.DSH_HOME;
+    const tb2 = await import(new URL('../src/task-book.js?case=fallback', import.meta.url).href);
+    assert.equal(tb2.REVIEW_HOME, join(homedir(), '.dsh', 'dsh-code-review'));
+  } finally {
+    process.env.DSH_REVIEW_HOME = prevReview;
+    if (prevDsh === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevDsh;
+  }
+});
+
 /* ---------- 5. runEngine ---------- */
 t('runEngine：stdout 收集 + 退出码', async () => {
   const r = await runEngine({ bin: process.execPath, args: ['-e', 'console.log("hello")'], timeoutMs: 5000 });
