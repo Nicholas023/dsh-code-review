@@ -298,6 +298,17 @@ export function createReviewTool(ctx, getConfig) {
       locations: args?.repo_path ? [{ path: String(args.repo_path) }] : [],
     }),
     async execute(args, _exec) {
+      // 早检：commit 模式缺 SHA / 纯空白 SHA 直接返回友好错误（不入队，issue #10）。
+      // 与 buildReviewArgs 的校验同源：buildReviewArgs 是权威层（后台 serve /
+      // 任务簿直投也会过它），此处只是会话工具入口的防线冗余、让用户第一时间
+      // 拿到可操作提示而非入队后失败——两侧校验规则必须一致，任何一侧变更
+      // （如空白串拒绝）都需同步另一侧。
+      if (
+        args?.mode === 'commit' &&
+        (args?.commit == null || (typeof args?.commit === 'string' && !args?.commit.trim()))
+      ) {
+        return { ok: false, text: 'commit 模式必须指定 commit SHA。请在 code_review 工具的 commit 参数中传入提交哈希值。' };
+      }
       const cfg = getConfig();
       const requestor = requestorOf(_exec);
       // cwdHint = 宿主会话工作目录（「省略 repo_path = 当前

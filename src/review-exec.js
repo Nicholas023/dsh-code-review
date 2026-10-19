@@ -145,25 +145,43 @@ async function executeReviewInner(task) {
   }
 
   // 3. 组装引擎参数（含排除路径、并发设置——并发由设置面板控制，见 config.js）。
-  const engineArgs = buildReviewArgs({
-    command: task.command === 'scan' ? 'scan' : 'review',
-    mode: task.command === 'scan' ? undefined : task.mode,
-    baseRef: task.baseRef,
-    headRef: task.headRef,
-    commit: task.commit,
-    focus: task.focus,
-    repoPath: task.repoPath,
-    excludePaths: task.excludePaths,
-    concurrencyEnabled: cfg.concurrency_enabled === true,
-    concurrency: cfg.concurrency,
-    // 引擎 --timeout：从进程级兜底 review_timeout_ms 折算为分钟（issue #9）。
-    // 经 normalizeConfig 后 review_timeout_ms ∈ [1, REVIEW_TIMEOUT_MAX]（见 config.js 钳制），
-    // 此处 ≥0 分支为防御性守卫（0 值正常流程走不到）：非有限/负数 → undefined，
-    // 不加 --timeout flag，引擎回退默认 15 分钟。
-    timeoutMinutes: Number.isFinite(cfg.review_timeout_ms) && cfg.review_timeout_ms >= 0
-      ? cfg.review_timeout_ms / 60_000
-      : undefined,
-  });
+  // commit 模式缺 SHA 时 buildReviewArgs 抛错（issue #10）——捕获后返回结构化
+  // 失败对象（ok:false + stderr=错误消息），不让异常穿透到 executeReview 的兜底
+  // catch（那里会统一包上「评审执行异常：」前缀，把可操作的提示淹没在异常外观里）。
+  let engineArgs;
+  try {
+    engineArgs = buildReviewArgs({
+      command: task.command === 'scan' ? 'scan' : 'review',
+      mode: task.command === 'scan' ? undefined : task.mode,
+      baseRef: task.baseRef,
+      headRef: task.headRef,
+      commit: task.commit,
+      focus: task.focus,
+      repoPath: task.repoPath,
+      excludePaths: task.excludePaths,
+      concurrencyEnabled: cfg.concurrency_enabled === true,
+      concurrency: cfg.concurrency,
+      // 引擎 --timeout：从进程级兜底 review_timeout_ms 折算为分钟（issue #9）。
+      // 经 normalizeConfig 后 review_timeout_ms ∈ [1, REVIEW_TIMEOUT_MAX]（见 config.js 钳制），
+      // 此处 ≥0 分支为防御性守卫（0 值正常流程走不到）：非有限/负数 → undefined，
+      // 不加 --timeout flag，引擎回退默认 15 分钟。
+      timeoutMinutes: Number.isFinite(cfg.review_timeout_ms) && cfg.review_timeout_ms >= 0
+        ? cfg.review_timeout_ms / 60_000
+        : undefined,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      code: null,
+      stdout: '',
+      stderr: error?.message || String(error),
+      timedOut: false,
+      elapsedSec: 0,
+      reportPath: null,
+      modelNote: '',
+      sensitiveBlock: '',
+    };
+  }
 
   // 4. 评审模型解析 + key 注入（零落盘：key 只进子进程 env）。
   // 端点解析失败（无会话模型、无用户配置路由，且官方付费兜底已于红线移除）
