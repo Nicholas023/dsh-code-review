@@ -22,16 +22,17 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync, openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { randomInt } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_CONFIG } from './config.js'; // 仅取键集合作 config 白名单（不构成循环依赖：config.js 无本地导入）
+import { DEFAULT_CONFIG, resolveDshRoot } from './config.js'; // 键集白名单 + DSH 根解析（不构成循环依赖：config.js 无本地导入）
 
-/** 评审工作根目录（env 可覆盖，测试/多用户场景用）。 */
+/** 评审工作根目录（env 可覆盖，测试/多用户场景用）。
+ * 回退分支跟随 resolveDshRoot()（优先 DSH_HOME，未设置回退 ~/.dsh）——
+ * 保证 DSH_HOME 自定义布局下任务簿/凭据/路由根一致，不出现 split-brain（issue #13）。 */
 export const REVIEW_HOME = process.env.DSH_REVIEW_HOME
   ? resolve(process.env.DSH_REVIEW_HOME)
-  : join(homedir(), '.dsh', 'dsh-code-review');
+  : join(resolveDshRoot(), 'dsh-code-review');
 
 /** 任务目录。 */
 export const TASKS_ROOT = join(REVIEW_HOME, 'tasks');

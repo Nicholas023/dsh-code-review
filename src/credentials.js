@@ -26,7 +26,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { resolveDshRoot } from './config.js';
 
 /** 从凭据文本中提取指定引用名的值。
  * 实况（实证 DSH 凭据 yaml）：所有凭据引用在
@@ -62,7 +62,8 @@ function escapeRe(s) {
  * @returns {string|null} 值 / ''（显式空值）/ null（文件缺失、键不存在或读取失败）。 */
 function readCredentialsYaml(name) {
   try {
-    const file = join(homedir(), '.dsh', '.credentials.yaml');
+    // 根目录统一走 resolveDshRoot：优先 DSH_HOME，回退 ~/.dsh（issue #13）。
+    const file = join(resolveDshRoot(), '.credentials.yaml');
     if (!existsSync(file)) return null;
     return parseCredentialsText(readFileSync(file, 'utf8'), name);
   } catch (error) {
