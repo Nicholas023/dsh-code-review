@@ -298,6 +298,10 @@ export function createReviewTool(ctx, getConfig) {
       locations: args?.repo_path ? [{ path: String(args.repo_path) }] : [],
     }),
     async execute(args, _exec) {
+      // 早检：commit 模式缺 SHA 直接返回友好错误（不入队，issue #10）。
+      if (args?.mode === 'commit' && !args?.commit) {
+        return { ok: false, text: 'commit 模式必须指定 commit SHA。请在 code_review 工具的 commit 参数中传入提交哈希值。' };
+      }
       const cfg = getConfig();
       const requestor = requestorOf(_exec);
       // cwdHint = 宿主会话工作目录（「省略 repo_path = 当前

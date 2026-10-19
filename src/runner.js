@@ -195,7 +195,12 @@ export function buildReviewArgs(opts) {
       // 引擎校验：--from/--to 必须成对。headRef 缺省回退 'HEAD'（引擎解析 ref）。
       args.push('--from', opts.baseRef || 'main', '--to', opts.headRef || 'HEAD');
     } else if (mode === 'commit') {
-      if (opts.commit) args.push('--commit', opts.commit);
+      // commit 模式必须指定 SHA——缺省时静默退回 uncommitted（fail-open），
+      // 用户以为在审某个 commit，实际在审别的东西（issue #10）。
+      if (!opts.commit) {
+        throw new Error('commit 模式必须指定 commit SHA（--commit <hash>）');
+      }
+      args.push('--commit', opts.commit);
     }
     // uncommitted（默认）：不加 diff 定位参数（引擎默认审查工作区未提交改动）。
   }
