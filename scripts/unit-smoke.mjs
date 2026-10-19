@@ -14,6 +14,7 @@
  * 零敏感：全部用通用样例，不触碰任何真实仓库与配置。
  */
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
@@ -21,7 +22,7 @@ const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const { buildReviewArgs, runEngine, prepareEngineEnv, collectPendingPaths } = await import(new URL('../src/runner.js', import.meta.url).href);
 const { isSensitivePath, listSensitiveFiles } = await import(new URL('../src/sensitive-list.js', import.meta.url).href);
 const { reportFilePath, repoNameOf } = await import(new URL('../src/report.js', import.meta.url).href);
-const { normalizeConfig, DEFAULT_CONFIG } = await import(new URL('../src/config.js', import.meta.url).href);
+const { normalizeConfig, DEFAULT_CONFIG, resolveDshRoot } = await import(new URL('../src/config.js', import.meta.url).href);
 const { createSettingsSchema } = await import(new URL('../src/settings-schema.js', import.meta.url).href);
 const { createModelSource, SESSION_MODEL, DEEPSEEK_OFFICIAL_DEFAULT } = await import(new URL('../src/model-provider.js', import.meta.url).href);
 const { parseCredentialsText } = await import(new URL('../src/credentials.js', import.meta.url).href);
@@ -196,6 +197,23 @@ t('normalizeConfig：并发开关类型清洗 + 广度钳制 1..32', () => {
   // 同输入两个入口两个结果已裁决为回退默认（面板/工具写入 0 都读回默认 8）。
   assert.equal(normalizeConfig({ concurrency: 0 }).concurrency, 8);      // ≤0 → 默认
   assert.equal(normalizeConfig({ concurrency: 'x' }).concurrency, 8);    // 非数 → 默认
+});
+
+t('resolveDshRoot：优先 DSH_HOME，未设置回退 homedir()/.dsh（issue #13）', () => {
+  // 注：用例全走 env 注入，不碰进程全局 process.env（不影响其他用例）。
+  assert.equal(resolveDshRoot({ DSH_HOME: 'D:/dsh-home' }), 'D:/dsh-home');
+  // trim 后采用（DSH_HOME 值带首尾空白时去空白，Windows 反斜杠尾分隔符保留）。
+  assert.equal(resolveDshRoot({ DSH_HOME: '  D:\\dsh-home\\  ' }), 'D:\\dsh-home\\');
+  // 未设置 / 空串 / 纯空白 → 一律回退默认 ~/.dsh。
+  assert.equal(resolveDshRoot({}), join(homedir(), '.dsh'));
+  assert.equal(resolveDshRoot({ DSH_HOME: '' }), join(homedir(), '.dsh'));
+  assert.equal(resolveDshRoot({ DSH_HOME: '   ' }), join(homedir(), '.dsh'));
+  // 不传参 = 默认走进程真实 env：按解析口径动态自洽（进程若设了 DSH_HOME 也一致）。
+  const expectDefault =
+    process.env.DSH_HOME && process.env.DSH_HOME.trim() !== ''
+      ? process.env.DSH_HOME.trim()
+      : join(homedir(), '.dsh');
+  assert.equal(resolveDshRoot(), expectDefault);
 });
 
 /* ---------- 5. runEngine ---------- */

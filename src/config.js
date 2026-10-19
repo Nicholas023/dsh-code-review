@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 dsh-code-review contributors
 
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
 /**
  * config.js —— dsh-code-review 配置模型：默认值、归一化、宿主 volatile 解包。
  *
@@ -159,4 +162,28 @@ export function normalizeConfig(raw) {
     cfg.concurrency = Math.min(CONCURRENCY_MAX, Math.max(CONCURRENCY_MIN, n));
   }
   return cfg;
+}
+
+/**
+ * 解析 DSH 根目录（issue #13：homedir()/.dsh 硬编码——自定义 DSH_HOME 时
+ * 路由/凭据解析失败）。
+ *
+ * 口径：
+ *   - 优先 env.DSH_HOME：非空字符串才采用，trim 后作为根（防值带意外空白；
+ *     空串/纯空白/非字符串一律视为未设置）——Windows 用户示例 D:\dsh-home；
+ *   - 未设置/空 → 回退 homedir()/.dsh（默认安装布局，行为与旧版完全一致）。
+ *
+ * 所有「home 下 .dsh 目录」相关的路径来源（模型路由 profiles、凭据文件等）
+ * 必须统一走这里，避免自定义 DSH_HOME 布局下各处解析不一致。
+ *
+ * @param {object} [env] 环境变量对象（默认 process.env；单测经此注入，
+ *   不污染进程全局环境）。
+ * @returns {string} DSH 根目录绝对路径。
+ */
+export function resolveDshRoot(env = process.env) {
+  const home =
+    env && typeof env.DSH_HOME === 'string' && env.DSH_HOME.trim() !== ''
+      ? env.DSH_HOME.trim()
+      : '';
+  return home !== '' ? home : join(homedir(), '.dsh');
 }

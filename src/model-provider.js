@@ -30,8 +30,8 @@
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
+import { resolveDshRoot } from './config.js';
 
 /** 评审模型「沿用会话模型」的保留标识（与 settings-schema / config 一致）。 */
 export const SESSION_MODEL = 'session';
@@ -67,7 +67,8 @@ function loadProfileLlmConfig() {
   } catch {
     return null; // 开发环境若 junction 未建也能继续（路由表可能为空，resolveProvider 返回 null）
   }
-  const profilesRoot = join(homedir(), '.dsh', 'profiles');
+  // 根目录统一走 resolveDshRoot：优先 DSH_HOME，回退 ~/.dsh（issue #13）。
+  const profilesRoot = join(resolveDshRoot(), 'profiles');
   // readdirSync 包 try/catch——目录无读权限（EACCES）或
   // existsSync 后被删的竞态不再一路抛到调用方（文件头约定「任何一步失败都
   // 不抛异常」）；目录名排序使多 profile 时「取第一个 deepseek/alternate」的
