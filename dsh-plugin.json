@@ -16,18 +16,18 @@
   "permissions": [
     {
       "name": "fs.write",
-      "scope": "~/.dsh/dsh-code-review/**、默认报告目录（~ 展开后的 ~/dsh-code-review-reports/**）及用户经 report_dir 配置的报告目录",
+      "scope": "~/.dsh/dsh-code-review/**、默认报告目录（~ 展开后的 ~/dsh-code-review-reports/**）及用户经 report_dir 配置的报告目录（写入前校验：须为用户 home 下绝对路径，解析符号链接后确认无目录遍历逃逸）",
       "reason": "落盘任务簿（tasks/ 任务文件）/ 插件运行配置（plugin-config.json）/ 评审报告留档"
     },
     {
       "name": "process.spawn",
-      "scope": "插件包 bin/ 或 PATH 中的 codecheck（含用户经 engine_bin 显式配置、写入前做本地文件校验的路径）；辅助命令 git / where|which / taskkill（平台子进程树终止）；以及以 process.execPath 拉起的本插件后台 serve 进程",
+      "scope": "插件包 bin/ 或 PATH 中的 codecheck（含用户经 engine_bin 显式配置的路径——engine_bin 须为绝对路径，且写入前校验文件存在、非符号链接、非 setuid 位）；辅助命令 git / where|which / taskkill（平台子进程树终止）；以及以 process.execPath 拉起的本插件后台 serve 进程",
       "reason": "评审引擎与后台 serve 均为外部子进程（由 runner / task-book 以子进程方式拉起执行），辅助命令服务于待提交清单（git）、引擎路径探测（where/which）与超时终止（taskkill）"
     },
     {
       "name": "credentials.read",
       "scope": "~/.dsh/.credentials.yaml 与环境变量中的模型凭据引用",
-      "reason": "调用评审 LLM 所需的 API key，复用宿主既有凭据通道"
+      "reason": "调用评审 LLM 所需的 API key，复用宿主既有凭据通道；凭据仅用于 API 调用，绝不写入日志或评审报告"
     }
   ],
   "contributes": {

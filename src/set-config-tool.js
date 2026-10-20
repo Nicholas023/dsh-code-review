@@ -22,8 +22,8 @@
  * @module dsh-code-review/set-config-tool
  */
 import { writeFileConfig, PLUGIN_CONFIG_FILE } from './file-config.js';
-import { existsSync, statSync, accessSync, constants } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { existsSync, statSync, accessSync, constants, realpathSync } from 'node:fs';
+import { resolve, join, basename, dirname, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { cwdOfExec } from './exec-context.js';
 
@@ -56,7 +56,7 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
       '【写入即生效】本工具把配置写入插件自有配置文件（用户目录下），后续评审任务立即按新值执行——',
       '不需要改客户端设置面板、不需要重启（0.2.0 宿主「面板保存」对第三方插件暂不回传运行层，面板改值会落盘但不到运行时，以本工具为准）。',
       '参数：review_model（评审模型标识：留空/省略 = 沿用会话模型；传其他值 = 显式另选，如 DSH 模型配置里已有的模型名）；',
-      'report_dir（评审报告落盘目录，支持 ~；传空串恢复默认 ~/dsh-code-review-reports）；',
+      'report_dir（评审报告落盘目录，支持 ~；写入前校验须为 home 下绝对路径、解析符号链接后无目录遍历逃逸；传空串恢复默认 ~/dsh-code-review-reports）；',
       'engine_bin（引擎 codecheck 路径；留空 = 自动探测。写入路径前请先确认文件存在——不存在/目录会被拒绝写入）；',
       '一个参数都不传 = 只查询当前生效配置（含默认值补齐），返回全量字段。',
     ].join(' '),
@@ -68,7 +68,7 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
       additionalProperties: false,
       properties: {
         review_model: { type: ['string', 'null'], description: '评审模型标识。省略/空串/null = 沿用会话模型；其他值 = 显式另选的模型。' },
-        report_dir: { type: ['string', 'null'], description: '报告目录（支持 ~）。空串/null 恢复默认。' },
+        report_dir: { type: ['string', 'null'], description: '报告目录（支持 ~；须位于 home 下，写入前校验路径无遍历逃逸）。空串/null 恢复默认。' },
         engine_bin: { type: ['string', 'null'], description: '引擎二进制路径。空串/null 恢复自动探测。传路径前请先确认文件存在——不存在/目录会被拒绝写入。' },
       },
       required: [],
@@ -199,12 +199,75 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
           patch.engine_bin = candidate;
         }
       }
-      // 整单只剩被拒的 engine_bin（其余字段时照写，拒绝原因进回显）。
-      if (Object.keys(patch).length === 0 && engineBinRejected !== null) {
+      // ---- issue #23：report_dir 写前校验（与 engine_bin 同风格；落实 dsh-plugin.json
+      // fs.write 声明的承诺「写入前校验为用户 home 下绝对路径、解析符号链接后无目录
+      // 遍历逃逸」）。report_dir 落盘后作为报告目录被 report.js 消费（mkdir/写文件），
+      // 用户可控路径不加校验 = 提示注入可把后续评审报告写到系统目录/任意位置；
+      // 校验失败只剔除该字段（与 engine_bin 同一「逐字段合并」语义），原因进回显。 ----
+      let reportDirRejected = null;
+      if (patch.report_dir !== null && patch.report_dir !== undefined) {
+        try {
+          const home = resolve(homedir());
+          // underHome：规范化前缀判断（win32 忽略大小写；home 自身也算合法）。
+          const underHome = (p) => {
+            const target = resolve(p);
+            const homeWithSep = home.endsWith(sep) ? home : home + sep;
+            return IS_WIN
+              ? target.toLowerCase() === home.toLowerCase() || target.toLowerCase().startsWith(homeWithSep.toLowerCase())
+              : target === home || target.startsWith(homeWithSep);
+          };
+          // 1) 展开 ~（与 report.js expandHome 同口径：'~' 与 '~/'、'~\\' 前缀）。
+          let expanded;
+          if (patch.report_dir === '~') {
+            expanded = homedir();
+          } else if (patch.report_dir.startsWith('~/') || patch.report_dir.startsWith('~\\')) {
+            expanded = join(homedir(), patch.report_dir.slice(2));
+          } else {
+            // 相对路径以**调用方会话目录**为基准解析（与 engine_bin 同基准）；
+            // 解析结果不在 home 下会被下方前缀校验拦下（相对路径几乎必错，显式拒绝）。
+            expanded = patch.report_dir;
+          }
+          const normAbs = resolve(cwdOfExec(_exec) ?? process.cwd(), expanded);
+          // 2) 绝对路径 + home 前缀（resolve 已规范化 .. 段，目录遍历逃逸在此层面失效）。
+          if (!underHome(normAbs)) {
+            reportDirRejected = `report_dir 校验失败：\`${patch.report_dir}\` 解析为 \`${normAbs}\`，不在用户 home 目录下（报告目录须为 home 下绝对路径，传空串可恢复默认）。`;
+          } else {
+            // 3) 符号链接逃逸：对**最近存在的祖先**做 realpath（目录可能尚未创建，
+            //    realpath 对不存在路径直接调用会抛 ENOENT），把不存在的后续段拼回，
+            //    再判断解析后仍在 home 内——防 home 下某父级是符号链接指向外部目录。
+            let probe = normAbs;
+            const tail = [];
+            while (!existsSync(probe)) {
+              const parent = dirname(probe);
+              if (parent === probe) break; // 到盘根，不再上溯
+              tail.unshift(basename(probe));
+              probe = parent;
+            }
+            const realFull = resolve(join(realpathSync(probe), ...tail));
+            if (!underHome(realFull)) {
+              reportDirRejected = `report_dir 校验失败：\`${patch.report_dir}\` 解析为 \`${normAbs}\`，解析符号链接后为 \`${realFull}\`，逃逸出用户 home 目录（报告目录须位于 home 下，传空串可恢复默认）。`;
+            } else if (existsSync(normAbs) && !statSync(normAbs).isDirectory()) {
+              reportDirRejected = `report_dir 校验失败：\`${normAbs}\` 已存在但不是目录（传空串可恢复默认）。`;
+            } else {
+              // 落盘规范化绝对路径（校验与消费端同一视角；expandHome 对绝对路径幂等，行为不变）。
+              patch.report_dir = normAbs;
+            }
+          }
+        } catch (error) {
+          reportDirRejected = `report_dir 校验异常：${String(error?.message ?? error)}（该字段未写入，其余字段不受影响）`;
+        }
+        if (reportDirRejected !== null) {
+          delete patch.report_dir;
+        }
+      }
+      // 整单只剩被拒字段（engine_bin / report_dir，其余字段时照写，拒绝原因进回显）。
+      const anyRejected = engineBinRejected !== null || reportDirRejected !== null;
+      if (Object.keys(patch).length === 0 && anyRejected) {
+        const rejected = [engineBinRejected, reportDirRejected].filter(Boolean).join('\n- ');
         return {
           ok: false,
           config_path: configFile,
-          text: `## 代码审查插件配置（写入被拒）\n\n- ${engineBinRejected}\n- 已拒绝写入，现有配置未改动。`,
+          text: `## 代码审查插件配置（写入被拒）\n\n- ${rejected}\n- 已拒绝写入，现有配置未改动。`,
         };
       }
       let wrote = false;
@@ -233,10 +296,11 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
         `- 评审模型：\`${active.review_model}\``,
         `- 报告目录：\`${active.report_dir}\``,
         `- 引擎路径：\`${active.engine_bin || '（自动探测）'}\``,
-        // 部分字段被拒（engine_bin 校验失败）时
+        // 部分字段被拒（engine_bin / report_dir 校验失败）时
         // 成功回显必须带拒绝说明——「写入成功」只是其余字段成功，被拒字段
         // 不可静默消失。
         ...(engineBinRejected !== null ? ['', `- ⚠ ${engineBinRejected}（该字段未写入，其余字段已生效）`] : []),
+        ...(reportDirRejected !== null ? ['', `- ⚠ ${reportDirRejected}（该字段未写入，其余字段已生效）`] : []),
         '- 提示：面板「设置」里的同名字段在 0.2.0 宿主对第三方插件的回传通道修复前暂不生效，以本工具/本配置文件为准。',
       ];
       return { ok: true, config_path: configFile, text: lines.join('\n') };
