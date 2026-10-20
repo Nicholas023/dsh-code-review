@@ -28,7 +28,10 @@ export const SENSITIVE_PATH_PATTERNS = [
   // 下方 id_* 行覆盖、*.pem 由凭据扩展名行覆盖）；.ssh 目录段单独无覆盖属
   // 已知盲区（引擎侧路径保护另有 .ssh 排除），勿据此删除下方覆盖行。
   /(^|\/)\.[^/]*key[^/]*$/i,
-  /(^|\/)\.[^/]*secret/i,
+  // issue #24：r2 与 r9 覆盖重叠归一——r2 只管「点开头的 secret 隐藏文件」（.secret/.secrets/.x.secret.yml）,
+  // r9 只管「非点开头词段」（(?!\.) 与 r2 互斥，见 r9 注释）；锚定收紧为 .env 式
+  // （后缀段可选且必须结尾），去掉旧无锚定写法（.anythingsecretanything 乱接形态不再命中）。
+  /(^|\/)\.[^/]*secrets?(\.[^/]+)?$/i,
   /(^|\/)\.env(\.[^/]+)?$/i, // .env / .env.production 等
   // 凭据扩展名必须作为「独立扩展名」出现（my.key、cert.pfx、server.crt.bak 等）：
   // 敏感词前必须由点号分隔（[^/]*\.），后跟行尾或再一个点（如 .key.bak 的 .bak）。
@@ -37,7 +40,10 @@ export const SENSITIVE_PATH_PATTERNS = [
   // 敏感文件，噪声稀释真正凭据命中的信号（issue #11）。修后路径段内嵌的
   // key/cert/pem（sessionkey.go、keycmd.go 等）也不再命中；id_rsa/credentials/.env
   // 等由各自独立规则覆盖，不受此行影响。
-  /(^|\/)[^/]*\.(pem|p12|pfx|keystore|jks|cert|crt|key|kdbx|otpkey)(\.|$)/i,
+  // issue #24：凭据扩展名锚定对齐 .env 模式（(\.[^/]+)?$）——扩展名后要么结尾、
+  // 要么跟**一个后缀段**再结尾，且整段必须到行尾（旧 (\\.|$) 无尾锚，扩展名后
+  // 跟随任意内容也命中，与 .env 的锚定口径不一致）。
+  /(^|\/)[^/]*\.(pem|p12|pfx|keystore|jks|cert|crt|key|kdbx|otpkey)(\.[^/]+)?$/i,
   /(^|\/)credentials[^/]*$/i,
   // token 模式收紧（形态：独立词段 token(s) + **凭据类扩展名或路径结尾**）——
   // 原 `.*token[^/]*$` 命中路径任意位置含 "token" 的文件（src/tokenizer.js、
@@ -45,7 +51,10 @@ export const SENSITIVE_PATH_PATTERNS = [
   // 扩展名收敛到凭据类白名单（与下方 token+分隔符规则同一白名单）：token.json /
   // api_token / my-tokens 命中；token.js（令牌类型定义模块）、tokens.ts、
   // design-tokens.md 等业务源码放出——避免把「代码文件」当凭据文件点名。
-  /(^|\/)(.*[.\-_])?tokens?(\.(json|yml|yaml|txt|ini|conf|cfg|config|log|bak|old|tmp|env))?$/i,
+  // issue #24：token(s) 显式词边界（(?=[._-]|$)）——tokens? 之后必须紧跟分隔符
+  // 或路径结尾，杜绝 tokenizer-decoder.yml 这类「token 词段后接普通字符」的形态
+  // 在未来正则结构调整时被误收（本次在结构上锁死「独立词段」语义）。
+  /(^|\/)(.*[.\-_])?tokens?(?=[._-]|$)(\.(json|yml|yaml|txt|ini|conf|cfg|config|log|bak|old|tmp|env))?$/i,
   // token 后跟分隔符、且带凭据类扩展名的形态（refresh_token_backup.json、
   // token_store.yaml、my_token.txt）——上一行的「token 作为独立词段 + 点号
   // 扩展名或路径结尾」覆盖不到它们：token 后不是点而是下划线/横线。此处不写
@@ -57,7 +66,10 @@ export const SENSITIVE_PATH_PATTERNS = [
   // secrets/credentials 命名（原 credentials 行只覆盖含字面量 credentials 的
   // 基名、\.secret 要求点开头）。
   /(^|\/)\.(npmrc|netrc|git-credentials)$/i,
-  /(^|\/)(secrets?|credentials?)(\.|\/|$)/i,
+  // issue #24：r9 与 r2 覆盖重叠归一——本行只管**非点开头**的 secrets/credentials
+  // 词段（(?!\.) 负向前瞻：点开头形态由 r2 负责，两行职责互斥不重叠，
+  // 改一处不会留下另一处没同步的隐式覆盖）。
+  /(^|\/)(?!\.)(secrets?|credentials?)(\.|\/|$)/i,
   // 个人/隐私信息。
   /(^|\/)(.*\.)?(id_rsa|id_dsa|id_ecdsa|id_ed25519)$/i,
   // 常见凭据兜底（作业本/测试台账类命名）。
@@ -117,7 +129,10 @@ export function buildSensitiveBlock(pendingPaths) {
     // 路径未经转义直接进反引号代码块——git 文件名可含
     // 反引号/换行（git 允许），会闭合代码块并向报告注入任意 markdown。拼接前
     // 剔除反引号与换行（点名目的是人眼确认路径，替换为空格不影响辨识）。
-    const safe = String(h.path).replace(/[`\r\n*_[\]<>|]+/g, ' ');
+    // issue #24：清洗字符类补 ~ # &——文件名可含删除线 ~、标题/锚点 #、HTML 实体
+    // 起始 &、代码块反引号等，均会破坏报告 markdown 结构（文件名注入报告格式）；
+    // 点名目的是人眼确认路径，替换为空格不影响辨识。
+    const safe = String(h.path).replace(/[`\r\n*_[\]<>|~#&]+/g, ' ');
     return `${i + 1}. \`${safe}\``;
   });
   return [
