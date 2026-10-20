@@ -22,8 +22,8 @@
  * @module dsh-code-review/set-config-tool
  */
 import { writeFileConfig, PLUGIN_CONFIG_FILE } from './file-config.js';
-import { existsSync, statSync, accessSync, constants } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { existsSync, statSync, accessSync, lstatSync, realpathSync, constants } from 'node:fs';
+import { resolve, join, isAbsolute, basename, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { cwdOfExec } from './exec-context.js';
 
@@ -189,6 +189,26 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
               engineBinRejected = `engine_bin 校验失败：\`${candidate}\` 存在但不可执行（权限不足或非可执行文件，传空串可恢复自动探测）。`;
             }
           }
+          // issue #23：补「绝对路径 / 非符号链接 / 非 setuid」校验——候选由
+          // resolve/join 构造通常已是绝对路径，仍显式校验一次（防御未来改动）；
+          // statSync 跟随符号链接，链接指向任意可执行文件也能通过 exists+isFile+
+          // X_OK 三层，需 lstat 单独判定；setuid 位会让引擎进程以文件属主权限
+          // 运行。与 dsh-plugin.json process.spawn scope 承诺逐字对齐。
+          if (engineBinRejected === null && !isAbsolute(candidate)) {
+            engineBinRejected = `engine_bin 校验失败：\`${candidate}\` 非绝对路径（该字段未写入）。`;
+          }
+          if (engineBinRejected === null) {
+            try {
+              const lst = lstatSync(candidate);
+              if (lst.isSymbolicLink()) {
+                engineBinRejected = `engine_bin 校验失败：\`${candidate}\` 是符号链接（防引擎路径被重定向到任意可执行文件，不接受符号链接，传空串可恢复自动探测）。`;
+              } else if (!IS_WIN && (lst.mode & 0o4000) !== 0) {
+                engineBinRejected = `engine_bin 校验失败：\`${candidate}\` 带 setuid 位（拒绝以文件属主权限拉起引擎，传空串可恢复自动探测）。`;
+              }
+            } catch (error) {
+              engineBinRejected = `engine_bin 校验异常：${String(error?.message ?? error)}（该字段未写入，其余字段不受影响）`;
+            }
+          }
         } catch (error) {
           engineBinRejected = `engine_bin 校验异常：${String(error?.message ?? error)}（该字段未写入，其余字段不受影响）`;
         }
@@ -199,12 +219,62 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
           patch.engine_bin = candidate;
         }
       }
-      // 整单只剩被拒的 engine_bin（其余字段时照写，拒绝原因进回显）。
-      if (Object.keys(patch).length === 0 && engineBinRejected !== null) {
+      // issue #23（深度方案）：report_dir 写前校验——此前直接落盘无校验，
+      // 恶意/误导路径（提示注入）会让后续评审把报告写到任意目录；码级校验
+      // 与 dsh-plugin.json fs.write scope 承诺一致：展开 ~ → 绝对路径 → 必须
+      // 位于用户 home 下 → 已存在段经 realpath 解析符号链接后无目录遍历逃逸。
+      // 与 engine_bin 同款「部分拒绝」语义：只剔除该字段，其余字段照常落盘。
+      let reportDirRejected = null;
+      if (patch.report_dir !== null && patch.report_dir !== undefined) {
+        let rd;
+        try {
+          const home = homedir();
+          if (patch.report_dir === '~') {
+            rd = home;
+          } else if (patch.report_dir.startsWith('~/') || patch.report_dir.startsWith('~\\')) {
+            rd = join(home, patch.report_dir.slice(2));
+          } else {
+            rd = resolve(cwdOfExec(_exec) ?? process.cwd(), patch.report_dir);
+          }
+          if (!isAbsolute(rd)) throw new Error(`解析结果 \`${rd}\` 非绝对路径`);
+          // home 前缀比对：Windows 卷/盘符与目录名大小写不敏感，小写归一后比较。
+          const norm = (p) => (IS_WIN ? String(p).toLowerCase() : String(p));
+          const homeReal = realpathSync(home);
+          let rdReal = rd;
+          if (existsSync(rd)) {
+            rdReal = realpathSync(rd); // 已存在：全量解析（含符号链接跳转）
+          } else {
+            // 目录尚未创建：逐级向上找最近存在祖先做 realpath，再原序拼接缺失
+            // 段——防「home 下看似合法、前缀段却是符号链接指向 home 外」（遍历逃逸）。
+            const missing = [];
+            let probe = rd;
+            while (!existsSync(probe)) {
+              const parent = dirname(probe);
+              if (parent === probe) break;
+              missing.push(basename(probe));
+              probe = parent;
+            }
+            rdReal = join(realpathSync(probe), ...missing.reverse());
+          }
+          if (!norm(rdReal).startsWith(norm(homeReal))) {
+            reportDirRejected = `report_dir 校验失败：\`${patch.report_dir}\` 解析为 \`${rd}\`（realpath \`${rdReal}\`），不在用户 home（\`${home}\`）下（传空串可恢复默认）。`;
+          }
+        } catch (error) {
+          reportDirRejected = `report_dir 校验异常：${String(error?.message ?? error)}（该字段未写入，其余字段不受影响）`;
+        }
+        if (reportDirRejected !== null) {
+          delete patch.report_dir;
+        } else {
+          // 落盘规范化绝对路径（与 engine_bin 同款口径：校验与消费端同一视角）。
+          patch.report_dir = rd;
+        }
+      }
+      // 整单只剩被拒的字段（其余字段时照写，拒绝原因进回显）。
+      if (Object.keys(patch).length === 0 && (engineBinRejected !== null || reportDirRejected !== null)) {
         return {
           ok: false,
           config_path: configFile,
-          text: `## 代码审查插件配置（写入被拒）\n\n- ${engineBinRejected}\n- 已拒绝写入，现有配置未改动。`,
+          text: `## 代码审查插件配置（写入被拒）\n\n- ${engineBinRejected ?? reportDirRejected}\n- 已拒绝写入，现有配置未改动。`,
         };
       }
       let wrote = false;
@@ -237,6 +307,7 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
         // 成功回显必须带拒绝说明——「写入成功」只是其余字段成功，被拒字段
         // 不可静默消失。
         ...(engineBinRejected !== null ? ['', `- ⚠ ${engineBinRejected}（该字段未写入，其余字段已生效）`] : []),
+        ...(reportDirRejected !== null ? ['', `- ⚠ ${reportDirRejected}（该字段未写入，其余字段已生效）`] : []),
         '- 提示：面板「设置」里的同名字段在 0.2.0 宿主对第三方插件的回传通道修复前暂不生效，以本工具/本配置文件为准。',
       ];
       return { ok: true, config_path: configFile, text: lines.join('\n') };
