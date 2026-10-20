@@ -22,8 +22,8 @@
  * @module dsh-code-review/set-config-tool
  */
 import { writeFileConfig, PLUGIN_CONFIG_FILE } from './file-config.js';
-import { existsSync, statSync, accessSync, constants } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { existsSync, statSync, realpathSync, accessSync, constants } from 'node:fs';
+import { resolve, join, sep, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { cwdOfExec } from './exec-context.js';
 
@@ -188,6 +188,17 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
             } catch {
               engineBinRejected = `engine_bin 校验失败：\`${candidate}\` 存在但不可执行（权限不足或非可执行文件，传空串可恢复自动探测）。`;
             }
+            // issue #23：setuid/setgid 位检查——可执行文件 + 特权位是经典提权
+            // 面（正常引擎二进制/脚本绝不带这些位，命中即可疑）。刻意未做符号
+            // 链接校验：brew/系统包管理器的合法 symlink 安装会被误拒（校验定位
+            // 是提示性防线，dsh-plugin.json 声明与实现保持同口径——未承诺非
+            // 符号链接）。
+            if (engineBinRejected === null) {
+              const mode = statSync(candidate).mode;
+              if ((mode & 0o4000) !== 0 || (mode & 0o2000) !== 0) {
+                engineBinRejected = `engine_bin 校验失败：\`${candidate}\` 带 setuid/setgid 位（0o${(mode & 0o6000).toString(8)}），拒绝写入（传空串可恢复自动探测）。`;
+              }
+            }
           }
         } catch (error) {
           engineBinRejected = `engine_bin 校验异常：${String(error?.message ?? error)}（该字段未写入，其余字段不受影响）`;
@@ -199,12 +210,74 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
           patch.engine_bin = candidate;
         }
       }
-      // 整单只剩被拒的 engine_bin（其余字段时照写，拒绝原因进回显）。
-      if (Object.keys(patch).length === 0 && engineBinRejected !== null) {
+      // report_dir 安全校验（issue #23）：该值原样落盘后会被 report.js 作为评审
+      // 报告根目录（mkdir -p 后写 .md）——模型经提示注入诱导 set-config 把
+      // report_dir 指向 /etc、../../sensitive-path 等即可写预期目录之外。与
+      // engine_bin 同风格做写前校验，但**不要求目录已存在**（报告目录是待建
+      // 目录，与引擎二进制「必须存在」语义不同）。
+      // 允许根 = 用户 home ∪ 调用方会话工作目录（用户可控位置）：相对路径
+      // resolve 后落在会话目录下；绝对路径必须落在两者之一，其余（/etc、系统
+      // 盘根等常规投毒目标）一律拒绝。符号链接逃逸：对已存在的最长祖先做
+      // realpath，解析结果越出允许根即拒绝（目录遍历逃逸检查）。
+      // null（清空）跳过校验；失败只剔除该字段、其余照常落盘（与 engine_bin
+      // 同口径），整单只剩被拒字段时下方统一按拒绝收尾。
+      let reportDirRejected = null;
+      if (patch.report_dir !== null && patch.report_dir !== undefined) {
+        let dirCandidate;
+        try {
+          if (patch.report_dir === '~') {
+            dirCandidate = homedir();
+          } else if (patch.report_dir.startsWith('~/') || patch.report_dir.startsWith('~\\')) {
+            dirCandidate = join(homedir(), patch.report_dir.slice(2));
+          } else {
+            dirCandidate = resolve(cwdOfExec(_exec) ?? process.cwd(), patch.report_dir);
+          }
+          const home = homedir();
+          const base = cwdOfExec(_exec) ?? process.cwd();
+          // 允许根比较：Windows 统一小写（盘符/大小写不敏感），POSIX 原样；
+          // 尾部统一 sep，避免 home/base 作为子串被误判（如 home='C:\\Users\\HP'、
+          // 候选='C:\\Users\\HP2' 不该算 home 下）。
+          const norm = (p) => (IS_WIN ? p.toLowerCase() : p);
+          const inAllowed = (p) => {
+            const pp = norm(p);
+            return pp === norm(home) || pp === norm(base)
+              || pp.startsWith(norm(home) + sep) || pp.startsWith(norm(base) + sep);
+          };
+          if (!inAllowed(dirCandidate)) {
+            reportDirRejected = `report_dir 校验失败：\`${patch.report_dir}\` 解析为 \`${dirCandidate}\`，不在用户 home 或会话工作目录下（报告目录仅允许这两处及其子目录；传空串可恢复默认目录）。`;
+          } else {
+            // 目录遍历逃逸：真实存在的最高祖先经 realpath 解析符号链接后必须仍
+            // 在允许根内（目录本身未创建时沿祖先链上溯到第一个存在的段）。
+            let probe = dirCandidate;
+            while (!existsSync(probe)) {
+              const parent = dirname(probe);
+              if (parent === probe) break;
+              probe = parent;
+            }
+            const resolved = realpathSync(probe);
+            if (!inAllowed(resolved)) {
+              reportDirRejected = `report_dir 校验失败：\`${patch.report_dir}\` 解析为 \`${dirCandidate}\`，其存在祖先 \`${probe}\` 解析符号链接后落在 \`${resolved}\`（越出允许范围，疑似目录遍历逃逸；传空串可恢复默认目录）。`;
+            }
+          }
+        } catch (error) {
+          reportDirRejected = `report_dir 校验异常：${String(error?.message ?? error)}（该字段未写入，其余字段不受影响）`;
+        }
+        if (reportDirRejected !== null) {
+          delete patch.report_dir;
+        } else {
+          // 落盘规范化绝对路径（与 engine_bin 同口径）——保证消费端
+          // expandHome/resolve 与校验视角一致，不存原始 `~/x`/相对形态。
+          patch.report_dir = dirCandidate;
+        }
+      }
+      // 整单只剩被拒字段（engine_bin / report_dir）时整体拒绝写入；其余字段
+      // 照常落盘、拒绝原因进回显。
+      if (Object.keys(patch).length === 0 && (engineBinRejected !== null || reportDirRejected !== null)) {
+        const why = [engineBinRejected, reportDirRejected].filter(Boolean).join('\n- ');
         return {
           ok: false,
           config_path: configFile,
-          text: `## 代码审查插件配置（写入被拒）\n\n- ${engineBinRejected}\n- 已拒绝写入，现有配置未改动。`,
+          text: `## 代码审查插件配置（写入被拒）\n\n- ${why}\n- 已拒绝写入，现有配置未改动。`,
         };
       }
       let wrote = false;
@@ -237,6 +310,7 @@ export function createSetConfigTool(ctx, getConfig, io = {}) {
         // 成功回显必须带拒绝说明——「写入成功」只是其余字段成功，被拒字段
         // 不可静默消失。
         ...(engineBinRejected !== null ? ['', `- ⚠ ${engineBinRejected}（该字段未写入，其余字段已生效）`] : []),
+        ...(reportDirRejected !== null ? ['', `- ⚠ ${reportDirRejected}（该字段未写入，其余字段已生效）`] : []),
         '- 提示：面板「设置」里的同名字段在 0.2.0 宿主对第三方插件的回传通道修复前暂不生效，以本工具/本配置文件为准。',
       ];
       return { ok: true, config_path: configFile, text: lines.join('\n') };
