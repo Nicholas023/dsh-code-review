@@ -102,21 +102,27 @@ try {
   };
   if (existsSync(reportDir)) walk(reportDir);
   check('报告文件已落盘（按日期/仓库分目录）', candidates.length >= 1, candidates[0] ?? '无');
+  // issue #22：此前这些断言整体嵌套在 if (candidates.length > 0) 内——评审
+  // 静默失败（未落盘/落盘目录异常）时整段跳过、零失败项假绿。把「报告存在」
+  // 抽成独立判据后，泄露检测断言无条件执行：评审失败本身也被记录，杜绝静默跳过。
+  check('报告文件已生成（评审链路未静默失败）', candidates.length > 0, candidates[0] ?? '无报告落盘');
   if (candidates.length > 0) {
     reportPath = candidates[0];
     const report = readFileSync(reportPath, 'utf8');
     check('报告含「敏感文件点名」节', report.includes('敏感文件点名'), '命中' );
     check('报告点名 .env（内容未送审的兜底人眼检查点）', report.includes('.env'), '点名项出现');
-    // 内容不送审：报告正文不得出现 .env 内容里的占位值。
-    // 断言值必须与上方写入 .env 的夹具**同一串**（改夹具不改断言 = 断言恒真假绿）。
-    const envProbes = ['EXAMPLE_PLACEHOLDER', 'EXAMPLE_NOT_A_REAL_KEY_12345'];
-    const leaked = envProbes.filter((s) => report.includes(s));
-    check('报告未含 .env 内容（密钥值不出现 = 内容未送审）', leaked.length === 0, leaked.join(',') || '无泄露');
-    // 引擎评审输出同样不得含密钥值（送审对象只有 app.py diff）。
-    const engineOut = text;
-    const leakedOut = envProbes.filter((s) => engineOut.includes(s));
-    check('引擎输出未含 .env 内容（送审链路也未触碰）', leakedOut.length === 0, leakedOut.join(',') || '无泄露');
   }
+  // 内容不送审断言：对报告与引擎输出各验一次「占位值不出现」。即使报告未落盘
+  // （candidates=0）也照常执行——泄露检测不依赖报告存在，评审失败被上一判据记录。
+  // 断言值必须与上方写入 .env 的夹具**同一串**（改夹具不改断言 = 断言恒真假绿）。
+  const envProbes = ['EXAMPLE_PLACEHOLDER', 'EXAMPLE_NOT_A_REAL_KEY_12345'];
+  const leaked = reportPath && existsSync(reportPath)
+    ? envProbes.filter((s) => readFileSync(reportPath, 'utf8').includes(s))
+    : [];
+  check('报告未含 .env 内容（密钥值不出现 = 内容未送审）', leaked.length === 0, leaked.join(',') || '无泄露');
+  const engineOut = text;
+  const leakedOut = envProbes.filter((s) => engineOut.includes(s));
+  check('引擎输出未含 .env 内容（送审链路也未触碰）', leakedOut.length === 0, leakedOut.join(',') || '无泄露');
 } finally {
   rmSync(work, { recursive: true, force: true });
   console.log('临时仓库/报告目录已清理。');

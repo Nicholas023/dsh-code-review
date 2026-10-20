@@ -111,6 +111,12 @@ try {
     // 提示不再硬编码 codecheck.exe——平台化路径由
     // BIN 计算得出，提示直接引用它（Linux/macOS 上出现 .exe 字面会误导）。
     check(`引擎存在（${BIN}）`, false, `请先把引擎二进制放到插件包 bin/（预期 ${BIN}）`);
+  } else if (typeof key !== 'string' || key.length < 8) {
+    // issue #22：key 未解析（undefined）时仍构造 OCR_LLM_TOKEN: key（即成
+    // 字面量 'undefined'）并 spawn 引擎空等 180s 必败。key 缺失 = 无真实端点
+    // 凭证，引擎评审无从发起——短路跳过引擎调用，明确输出跳过原因（无
+    // DEEPSEEK_API_KEY 的开发机/CI 不应以「空等超时」形态误报失败）。
+    check('跳过引擎调用（key 缺失）', true, '未解析到 DEEPSEEK_API_KEY（真实端点 token），引擎无法评审；配置 ~/.dsh/.credentials.yaml 后重跑');
   } else {
     const env = {
       ...process.env,
