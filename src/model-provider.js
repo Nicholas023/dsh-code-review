@@ -64,7 +64,13 @@ function loadProfileLlmConfig() {
   let yaml;
   try {
     yaml = require('js-yaml');
-  } catch {
+  } catch (error) {
+    // issue #21：js-yaml 依赖损坏（缺包/版本不兼容/加载抛错）此前被静默吞掉——
+    // 路由表为空 → 评审 0.0s 失败且失败文案不指向原因。这里只输出可诊断信息
+    // （真实错误原因），绝不抛出、绝不改变返回值契约：scripts/switch-model-e2e.mjs
+    // 的 check('解析出端点', !!ep) + ep?.keyEnv ?? '' 安全链与运行态降级链都
+    // 依赖「解析失败 = 返回 null 不抛」。
+    console.error('[dsh-code-review] 警告：加载 js-yaml 失败（依赖损坏），模型路由表将为空，评审可能失败。原因：', String(error?.message ?? error));
     return null; // 开发环境若 junction 未建也能继续（路由表可能为空，resolveProvider 返回 null）
   }
   // 根目录统一走 resolveDshRoot：优先 DSH_HOME，回退 ~/.dsh（issue #13）。
