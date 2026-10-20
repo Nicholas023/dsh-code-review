@@ -64,8 +64,18 @@ function loadProfileLlmConfig() {
   let yaml;
   try {
     yaml = require('js-yaml');
-  } catch {
-    return null; // 开发环境若 junction 未建也能继续（路由表可能为空，resolveProvider 返回 null）
+  } catch (error) {
+    // issue #21：js-yaml 依赖损坏/缺失时此前静默 return null——路由表为空、
+    // 评审 0.0s 失败且失败文案不指向原因，排查者无从下手。输出可诊断信息
+    // （含真实错误原因）后**仍保持 return null 契约**：运行态降级链与
+    // scripts/switch-model-e2e.mjs 的 check('解析出端点', !!ep) + ep?.keyEnv
+    // 安全链都依赖「解析失败 = 返回 null 不抛」，此分支只允许加诊断，绝不
+    // 能改成抛异常/改返回值。
+    console.error(
+      '[dsh-code-review] js-yaml 加载失败：评审模型配置（profile 的 cordis.patch.yml）无法解析，' +
+      '路由表将为空（评审会因缺少 LLM 端点而失败）。原因：' + String(error?.message ?? error),
+    );
+    return null; // 契约不变：解析失败 = 返回 null 不抛（路由表空时由 resolveProvider 返回 null，调用方明确报错）
   }
   // 根目录统一走 resolveDshRoot：优先 DSH_HOME，回退 ~/.dsh（issue #13）。
   const profilesRoot = join(resolveDshRoot(), 'profiles');
