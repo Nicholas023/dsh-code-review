@@ -28,7 +28,12 @@ export const SENSITIVE_PATH_PATTERNS = [
   // 下方 id_* 行覆盖、*.pem 由凭据扩展名行覆盖）；.ssh 目录段单独无覆盖属
   // 已知盲区（引擎侧路径保护另有 .ssh 排除），勿据此删除下方覆盖行。
   /(^|\/)\.[^/]*key[^/]*$/i,
-  /(^|\/)\.[^/]*secret/i,
+  // 隐藏文件/目录（点开头）中 secret 作为**独立词段**出现（.secret、.secrets.yml、
+  // .my-secrets、dir/.secrets）。与下方 secrets?|credentials? 行分工：该行只管点
+  // 开头形态；非隐藏的 secrets/credentials.yml 等由 secrets?|credentials? 行覆盖
+  // （两个正则不再对同一形态重叠发力）。末尾 (?=[.\-_]|$) 保证 secret 词段后有
+  // 分隔符或行尾——隐藏词段内嵌 secret 子串的其他形态不再被宽泛 [^/]* 吞入。
+  /(^|\/)\.([^/]*[.\-_])?secrets?(?=[.\-_]|$)/i,
   /(^|\/)\.env(\.[^/]+)?$/i, // .env / .env.production 等
   // 凭据扩展名必须作为「独立扩展名」出现（my.key、cert.pfx、server.crt.bak 等）：
   // 敏感词前必须由点号分隔（[^/]*\.），后跟行尾或再一个点（如 .key.bak 的 .bak）。
@@ -37,7 +42,11 @@ export const SENSITIVE_PATH_PATTERNS = [
   // 敏感文件，噪声稀释真正凭据命中的信号（issue #11）。修后路径段内嵌的
   // key/cert/pem（sessionkey.go、keycmd.go 等）也不再命中；id_rsa/credentials/.env
   // 等由各自独立规则覆盖，不受此行影响。
-  /(^|\/)[^/]*\.(pem|p12|pfx|keystore|jks|cert|crt|key|kdbx|otpkey)(\.|$)/i,
+  // 凭据扩展名后允许再跟一段点号修饰（.key.bak 的 .bak）或直接行尾——与 .env
+  // 行的 (\.[^/]+)?$ 锚定形态对齐（issue #24：原 (\.|$) 只认「单个点或行尾」，
+  // 边界语义不一致；对齐后 .key.bak.bak 这类「凭据扩展名后仍是文件修饰」也按
+  // 同口径处理）。
+  /(^|\/)[^/]*\.(pem|p12|pfx|keystore|jks|cert|crt|key|kdbx|otpkey)(\.[^/]+)?$/i,
   /(^|\/)credentials[^/]*$/i,
   // token 模式收紧（形态：独立词段 token(s) + **凭据类扩展名或路径结尾**）——
   // 原 `.*token[^/]*$` 命中路径任意位置含 "token" 的文件（src/tokenizer.js、
@@ -45,7 +54,11 @@ export const SENSITIVE_PATH_PATTERNS = [
   // 扩展名收敛到凭据类白名单（与下方 token+分隔符规则同一白名单）：token.json /
   // api_token / my-tokens 命中；token.js（令牌类型定义模块）、tokens.ts、
   // design-tokens.md 等业务源码放出——避免把「代码文件」当凭据文件点名。
-  /(^|\/)(.*[.\-_])?tokens?(\.(json|yml|yaml|txt|ini|conf|cfg|config|log|bak|old|tmp|env))?$/i,
+  // token 词段后必须跟随分隔符（. _ -）或行尾（(?=[._-]|$)）——issue #24：
+  // tokens? 缺词边界时，只要路径内存在 "token" 子串且其后以 .yml 等合法扩展名
+  // 收尾即命中，tokenizer-decoder.yml / tokenizer.config 这类「token 只是词前缀」
+  // 的业务命名会被误收（词边界挡住：token 后跟 "i" 不是分隔符也不是行尾）。
+  /(^|\/)(.*[.\-_])?tokens?(?=[._-]|$)(\.(json|yml|yaml|txt|ini|conf|cfg|config|log|bak|old|tmp|env))?$/i,
   // token 后跟分隔符、且带凭据类扩展名的形态（refresh_token_backup.json、
   // token_store.yaml、my_token.txt）——上一行的「token 作为独立词段 + 点号
   // 扩展名或路径结尾」覆盖不到它们：token 后不是点而是下划线/横线。此处不写
@@ -117,7 +130,7 @@ export function buildSensitiveBlock(pendingPaths) {
     // 路径未经转义直接进反引号代码块——git 文件名可含
     // 反引号/换行（git 允许），会闭合代码块并向报告注入任意 markdown。拼接前
     // 剔除反引号与换行（点名目的是人眼确认路径，替换为空格不影响辨识）。
-    const safe = String(h.path).replace(/[`\r\n*_[\]<>|]+/g, ' ');
+    const safe = String(h.path).replace(/[`\r\n*_~#&\[\]<>|]+/g, ' ');
     return `${i + 1}. \`${safe}\``;
   });
   return [
