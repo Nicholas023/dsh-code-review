@@ -112,11 +112,21 @@ try {
     const envProbes = ['EXAMPLE_PLACEHOLDER', 'EXAMPLE_NOT_A_REAL_KEY_12345'];
     const leaked = envProbes.filter((s) => report.includes(s));
     check('报告未含 .env 内容（密钥值不出现 = 内容未送审）', leaked.length === 0, leaked.join(',') || '无泄露');
-    // 引擎评审输出同样不得含密钥值（送审对象只有 app.py diff）。
-    const engineOut = text;
-    const leakedOut = envProbes.filter((s) => engineOut.includes(s));
-    check('引擎输出未含 .env 内容（送审链路也未触碰）', leakedOut.length === 0, leakedOut.join(',') || '无泄露');
+  } else {
+    // issue #22：报告断言不再静默跳过——评审失败（报告未落盘）时逐条记 FAIL
+    // 并归因到「评审未产出报告」，杜绝零失败项假绿。
+    check('报告含「敏感文件点名」节', false, '报告缺失——评审未产出报告，点名断言无法通过');
+    check('报告点名 .env（内容未送审的兜底人眼检查点）', false, '报告缺失——评审未产出报告，点名断言无法通过');
+    check('报告未含 .env 内容（密钥值不出现 = 内容未送审）', false, '报告缺失——评审未产出报告，泄露断言无法通过');
   }
+  // 引擎评审输出泄露断言：从 candidates>0 嵌套提出（issue #22）——无论报告是否
+  // 落盘，只要 reviewOnce 有返回就检查其不泄露 .env 内容；评审静默失败（text 空）
+  // 时也记录失败归因，而非整段跳过。
+  const engineOut = text;
+  const envProbesOut = ['EXAMPLE_PLACEHOLDER', 'EXAMPLE_NOT_A_REAL_KEY_12345'];
+  const leakedOut = envProbesOut.filter((s) => engineOut.includes(s));
+  check('引擎输出未含 .env 内容（送审链路也未触碰）', engineOut.length > 0 && leakedOut.length === 0,
+    engineOut.length === 0 ? '评审输出为空（评审失败/跳过），泄露断言视同未通过' : (leakedOut.join(',') || '无泄露'));
 } finally {
   rmSync(work, { recursive: true, force: true });
   console.log('临时仓库/报告目录已清理。');

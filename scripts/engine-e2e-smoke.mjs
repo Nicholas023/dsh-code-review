@@ -41,6 +41,9 @@ const BIN = join(PKG_ROOT, 'bin', engineBinName());
 const IS_WIN = process.platform === 'win32';
 
 let failures = 0;
+// 条件跳过计数（issue #22）：key 缺失等环境性缺失属「跳过」而非「失败」，
+// 计入 skipped；末尾文案显式区分，避免无 key 机器误判为引擎失败。
+let skipped = 0;
 const check = (label, ok, detail = '') => {
   console.log(`${ok ? '✔' : '✘'} ${label}${detail ? ` —— ${detail}` : ''}`);
   if (!ok) failures += 1;
@@ -111,6 +114,14 @@ try {
     // 提示不再硬编码 codecheck.exe——平台化路径由
     // BIN 计算得出，提示直接引用它（Linux/macOS 上出现 .exe 字面会误导）。
     check(`引擎存在（${BIN}）`, false, `请先把引擎二进制放到插件包 bin/（预期 ${BIN}）`);
+  } else if (!(typeof key === 'string' && key.length >= 8)) {
+    // issue #22：key 解析失败（undefined）时仍构造 OCR_LLM_TOKEN: key（即成
+    // 字面量 'undefined'）并 spawn 引擎空等 180s 必败——短路跳过引擎调用，
+    // check 输出明确提示。跳过属条件形态：不计 failures（skipped 计入），
+    // 末尾文案显式区分，杜绝「无 key 机器误报引擎失败」。
+    skipped += 1;
+    check('跳过引擎调用（key 缺失：未配置 DEEPSEEK_API_KEY）', true,
+      '条件跳过——配置 ~/.dsh/.credentials.yaml 后此步执行真实评审');
   } else {
     const env = {
       ...process.env,
@@ -157,8 +168,8 @@ try {
 
 // 自然退出（process.exit 在 Windows libuv 下可能触发 fetch 句柄断言崩溃）。
 if (failures > 0) {
-  console.log(`\n✘ ${failures} 项未通过`);
+  console.log(`\n✘ ${failures} 项未通过${skipped > 0 ? `（另有 ${skipped} 项因 key 缺失条件跳过）` : ''}`);
   process.exitCode = 1;
 } else {
-  console.log('\n✔ 引擎端到端实证通过：评审模型（用户配置端点）真实审查跑通');
+  console.log(`\n✔ 引擎端到端实证通过：评审模型（用户配置端点）真实审查跑通${skipped > 0 ? '（引擎调用因 key 缺失已跳过）' : ''}`);
 }
