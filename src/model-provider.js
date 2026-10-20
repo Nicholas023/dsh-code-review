@@ -64,8 +64,18 @@ function loadProfileLlmConfig() {
   let yaml;
   try {
     yaml = require('js-yaml');
-  } catch {
-    return null; // 开发环境若 junction 未建也能继续（路由表可能为空，resolveProvider 返回 null）
+  } catch (error) {
+    // issue #21：js-yaml 依赖损坏（残损 junction / 安装缺失）此前被静默吞掉——
+    // 路由表为空 → 评审 0.0s 失败且失败文案只报「端点未配置」，掩盖真实原因。
+    // 这里输出可诊断信息（含真实错误原因），但仍保持原 return null 契约：
+    // 调用方（resolveProvider → 运行态降级链 / scripts/switch-model-e2e.mjs 的
+    // check('解析出端点', !!ep) + ep?.keyEnv ?? '' 安全链）依赖「解析失败 =
+    // 返回 null 不抛」，绝不能改成抛异常或改变返回值契约。
+    console.error(
+      '[dsh-code-review] loadProfileLlmConfig: 加载 js-yaml 失败，评审模型路由表将为空（解析失败返回 null，不抛异常）。真实原因：' +
+        String((error && error.message) || error)
+    );
+    return null;
   }
   // 根目录统一走 resolveDshRoot：优先 DSH_HOME，回退 ~/.dsh（issue #13）。
   const profilesRoot = join(resolveDshRoot(), 'profiles');
