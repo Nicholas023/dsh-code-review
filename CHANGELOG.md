@@ -2,6 +2,27 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.1.3] - 2026-10-21
+
+### Fixed（issue #9–#24 汇集，含 4 路方案整合 #29）
+
+- **评审超时口径（#9）**：`--timeout` 透传引擎、工具描述改准确；`timeoutMinutes` 亚分钟值按 1 分钟计、非有限值不加 `--timeout`
+- **commit 模式 SHA 校验 fail-closed（#10）**：缺 SHA / 纯空白 SHA 均明确报错，杜绝静默降级 fail-open
+- **敏感文件正则误报（#11）**：key.js / cert.js / pem.js 不再被误判——凭据扩展名必须独立成段（路径段内嵌不命中）
+- **README unit 自检数量修正（#12）**：28 → 60
+- **`.dsh` 硬编码迁移（#13）**：homedir()/.dsh 优先读取 DSH_HOME 环境变量（resolveDshRoot 统一）
+- **js-yaml 加载静默失败（#21）**：评审模型解析失败输出**真实错误原因**（含依赖损坏提示），`return null` 契约不变、降级链零影响
+- **e2e 无 key 环境误报（#22）**：key 缺失短路跳过引擎调用（skipped 独立计数，不计失败，末尾文案区分）；敏感断言提出嵌套 **防假绿**——报告缺失时逐条显式 FAIL 归因
+- **权限声明与实现逐字一致（#23）**：report_dir 写入前校验（绝对路径 + **必须位于用户 home 下** + realpath 防符号链接逃逸）、engine_bin 校验（绝对路径 + 文件存在 + **非符号链接** + **非 setuid/setgid 位**）；被拒字段**字段级剔除**、拒绝原因回显，声明承诺（dsh-plugin.json）与码级校验同步实现——修复 sol-a/sol-b 历史「声明了未实现」假承诺
+- **敏感名单收窄（#24）**：token/secret 独立词段词边界（`tokenizer.js` 等业务命名不再误点名）、凭据扩展名锚定、markdown 清洗补 `~#&`、正则重叠归一
+
+### Changed
+
+- **四路方案取舍整合**：issue #21–#24 由 4 路独立分治（PR #25–#28）分别修复，lead 实测比对（diff + worktree 源码核验）取各路精华整合为 PR #29 合并；4 路方案 PR 关闭存档可回溯
+
+### Notes
+
+- 发布后插件评审发现的 7 条 backlog（#30–#36，含 report_dir home 前缀守卫等）不影响正常使用，暂缓修复，记录在案
 ## [0.1.2] - 2026-10-18
 
 ### 引擎 fork 治理（#2–#7 合并）
@@ -80,7 +101,8 @@
 - `result-text` 的 `elapsedSec` 非有限值回退 0，避免渲染 `NaN`。
 - 评审链路边界整改：并发配置传递、`--exclude` 单值语义、readBody 分片计数上限等（R8 剩余条目 / R9 评审）。
 
-[Unreleased]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Nicholas023/dsh-code-review/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Nicholas023/dsh-code-review/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Nicholas023/dsh-code-review/releases/tag/v0.1.0

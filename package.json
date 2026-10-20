@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-review",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "智能代码审查插件：把引擎 codecheck（open-code-review 的 fork）接入 DSH —— 对仓库 diff/扫描执行安全脱敏、找 bug、冗余与无关代码三个固定视角的评审，会话内返回问题清单并落一份报告文件留档。默认沿用会话模型（DeepSeek-V41-Flash），设置面板可另选 DSH 中已配置的评审模型。",
   "type": "module",
   "main": "src/index.js",
