@@ -111,6 +111,14 @@ try {
     // 提示不再硬编码 codecheck.exe——平台化路径由
     // BIN 计算得出，提示直接引用它（Linux/macOS 上出现 .exe 字面会误导）。
     check(`引擎存在（${BIN}）`, false, `请先把引擎二进制放到插件包 bin/（预期 ${BIN}）`);
+  } else if (typeof key !== 'string' || key.length < 8) {
+    // issue #22：key 未解析（undefined）时旧代码仍构造 OCR_LLM_TOKEN: key
+    // （成字面量 'undefined'）并 spawn 引擎空等 180s 必败——无 key 环境把
+    // e2e 误报成「引擎失败」。短路跳过引擎调用：每次只注入自己的 key 判定
+    // （与上方 check 同一口径 `typeof key === 'string' && key.length >= 8` 取反），
+    // 明确输出跳过原因，不再空等、不误报失败。
+    check('跳过引擎调用（key 缺失）', true,
+      '无 DEEPSEEK_API_KEY：不构造 OCR_LLM_TOKEN=undefined 的 spawn（避免空等 180s 必败），这是无 key 环境的预期跳过形态');
   } else {
     const env = {
       ...process.env,

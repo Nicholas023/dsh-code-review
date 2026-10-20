@@ -102,6 +102,9 @@ try {
   };
   if (existsSync(reportDir)) walk(reportDir);
   check('报告文件已落盘（按日期/仓库分目录）', candidates.length >= 1, candidates[0] ?? '无');
+  // envProbes 提前定义（报告与引擎两条泄露断言共用同一夹具串——
+  // 改夹具必须同步两处断言，防「改夹具不改断言 = 恒真假绿」）。
+  const envProbes = ['EXAMPLE_PLACEHOLDER', 'EXAMPLE_NOT_A_REAL_KEY_12345'];
   if (candidates.length > 0) {
     reportPath = candidates[0];
     const report = readFileSync(reportPath, 'utf8');
@@ -109,13 +112,18 @@ try {
     check('报告点名 .env（内容未送审的兜底人眼检查点）', report.includes('.env'), '点名项出现');
     // 内容不送审：报告正文不得出现 .env 内容里的占位值。
     // 断言值必须与上方写入 .env 的夹具**同一串**（改夹具不改断言 = 断言恒真假绿）。
-    const envProbes = ['EXAMPLE_PLACEHOLDER', 'EXAMPLE_NOT_A_REAL_KEY_12345'];
     const leaked = envProbes.filter((s) => report.includes(s));
     check('报告未含 .env 内容（密钥值不出现 = 内容未送审）', leaked.length === 0, leaked.join(',') || '无泄露');
-    // 引擎评审输出同样不得含密钥值（送审对象只有 app.py diff）。
-    const engineOut = text;
-    const leakedOut = envProbes.filter((s) => engineOut.includes(s));
+  }
+  // issue #22：引擎输出泄露断言**不得嵌套在报告分支内**——reviewOnce 静默失败
+  // 且报告未落盘时整段跳过 = 假绿。提出为独立断言：评审失败（text 空）也
+  // 显式失败归因（不许空输出借「不含泄露样本」恒过）；空输出本身由上方
+  // 「评审返回非空文本」check 钉住失败，两条失败信息叠加让排查指向同一根因。
+  if (typeof text === 'string' && text.length > 0) {
+    const leakedOut = envProbes.filter((s) => text.includes(s));
     check('引擎输出未含 .env 内容（送审链路也未触碰）', leakedOut.length === 0, leakedOut.join(',') || '无泄露');
+  } else {
+    check('引擎输出未含 .env 内容（送审链路也未触碰）——评审无输出', false, '评审返回空文本，无法验证送审链路（根因见上方「评审返回非空文本」失败项）');
   }
 } finally {
   rmSync(work, { recursive: true, force: true });
