@@ -23,7 +23,8 @@
     "test:watch": "vitest",
     "bench": "node scripts/benchmark-tokens.mjs",
     "check": "npm run typecheck && npm run test",
-    "verify": "npm run typecheck && npm run build && npm run test"
+    "verify": "npm run typecheck && npm run build && npm run test",
+    "release:check": "npm run build && node scripts/release.mjs"
   },
   "keywords": [
     "dsh",

@@ -21,10 +21,10 @@
 ```
 
 - **type**（英文前缀）：`feat` 新功能 / `fix` 修 bug / `docs` 文档 / `refactor` 重构 / `chore` 构建与杂务 / `test` 测试 / `build` 构建 / `perf` 性能。
-- **scope** 示例：`plugin`（DSH 插件侧）/ `engine`（codecheck 引擎侧）/ `rule`（评审规则）。
+- **scope** 示例：`plugin`（DSH 插件侧）/ `kernel`（审查内核）/ `rule`（评审规则）。0.2.0 起没有独立引擎进程。
 - 摘要写「为什么」，不写「改了什么」（后者由 diff 承担）；必要时正文展开动机。
 - **一次提交 = 一个意图**：能用一个「因为…所以…」讲完才提交；讲不完就拆，禁止一次提交跨多个模块的混合变更。
-- **提交前自检**：语法/编译检查通过（Go engine：`go build`；Node 插件：`node --check` / 类型检查）；`git status` 逐个核对无敏感文件、无运行时产物混入；不用 `git add -A` 盲提交。
+- **提交前自检**：`npm run typecheck && npm run test` 必须全绿；`git status` 逐个核对无敏感文件、无运行时产物混入（`dist/`、`release/` 已被忽略）；不用 `git add -A` 盲提交。
 
 ## 3. PR 流程
 
@@ -48,12 +48,12 @@
 1. **零敏感原则**：插件/引擎代码不硬编码任何特定平台、账号、密钥（详见 README「评审模型」与 SECURITY.md）。提交前 `git diff` 自查。
 2. **敏感文件不进历史**：`.env`、密钥、凭据、PII、内部 IP/域名一律不提交；`.gitignore` 已含拦截模式，但 `git add` 前仍须逐文件核对（误提交后处理见全局 `version-control` skill：先轮换凭据，再清历史）。
 3. **评审报告不入库**：`reports/` 已忽略（评审报告含被审代码内容，属运行时留档凭证）。
-4. **引擎 fork 合规**：engine/ 自 open-code-review 拷贝时保留上游版权与 NOTICE 声明（Apache-2.0 §4）。
+4. **来源与许可**：0.2.0 的实现与 alibaba/open-code-review 无关，但规则设计思路参考了它；`NOTICE` 保留这份归属说明，不要删除。
 
 ## 6. 开发流程
 
 - **小步走**：一次提交一个意图（§2）；未完成的阶段性工作留在 `feature/*` 分支，验证通过再合 `main`。
-- **提交前自检**：`node --check` / `go build` 通过；`git status` 逐个核对无敏感文件、无运行时产物混入（§5）。
+- **提交前自检**：`npm run typecheck && npm run test` 通过；`git status` 逐个核对无敏感文件、无运行时产物混入（§5）。
 - **发布前必经关**：零敏感自检（见 SECURITY.md）通过 + 至少一次评审（异构优先）；本地 DSH 环境热装验收通过。
 
 ## 7. 文档同步义务

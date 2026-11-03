@@ -6,8 +6,10 @@
   "compilerOptions": {
     "noEmit": false,
     "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
+    // 不产出 sourcemap：发布包体积减半，也不把源码结构暴露给使用者。
+    // 需要调试时用 dist 里的 .d.ts + 源码 worktree 对照。
+    "declarationMap": false,
+    "sourceMap": false,
     "outDir": "dist",
     "rootDir": "src"
   },
