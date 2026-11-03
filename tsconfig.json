@@ -21,6 +21,9 @@
 
     // 模块与互操作
     "verbatimModuleSyntax": true,
+    // 测试会 import .tsx 组件做纯函数断言；宿主代码本身没有 JSX，
+    // 这里打开只为让类型检查能解析到 .tsx 模块（不 emit）。
+    "jsx": "react-jsx",
     "isolatedModules": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
