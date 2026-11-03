@@ -156,15 +156,18 @@ writeFileSync(outPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
 // 也比手写 zip 容器可靠。打包只是把 dist + 元数据装进一个文件，
 // 不做任何转换 —— 发布产物必须与 manifest 记录的哈希完全一致。
 if (process.argv.includes('--pack') && failures.length === 0) {
-  const archive = join(outDir, 'dsh-code-review-' + String(manifest.version) + '.tar.gz')
+  // 用相对路径：GNU tar 会把带冒号的 Windows 绝对路径（D:\…）当成「远程主机:路径」。
+  const archiveName = 'dsh-code-review-' + String(manifest.version) + '.tar.gz'
+  const archive = join('release', archiveName)
   try {
     const inputs = ['dist', 'package.json', 'README.md', 'UPGRADING.md', 'CHANGELOG.md', 'LICENSE', 'NOTICE', 'cordis.patch.yml']
       .filter((p) => existsSync(join(ROOT, p)))
-    execFileSync('tar', ['-czf', archive, ...inputs], { cwd: ROOT, stdio: 'pipe' })
-    manifest.archive = { path: relative(ROOT, archive), bytes: statSync(archive).size }
+    // --force-local 是双保险：即使路径里出现冒号也按本地文件处理
+    execFileSync('tar', ['--force-local', '-czf', archive, ...inputs], { cwd: ROOT, stdio: 'pipe' })
+    manifest.archive = { path: archive.replace(/\\/g, '/'), bytes: statSync(join(ROOT, archive)).size }
     writeFileSync(outPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
     if (!process.argv.includes('--json')) {
-      console.log('归档：' + relative(ROOT, archive) + '（' + (statSync(archive).size / 1024).toFixed(1) + ' KB）')
+      console.log('归档：' + archive + '（' + (statSync(join(ROOT, archive)).size / 1024).toFixed(1) + ' KB）')
     }
   } catch (error) {
     failures.push('打包失败：' + String(error.message ?? error))
