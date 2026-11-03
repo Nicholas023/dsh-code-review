@@ -1,0 +1,16 @@
+{
+  // dsh-code-review 0.2.0 —— 构建配置（内核侧）
+  // 继承类型检查配置，但打开 emit：把 src 下的 TypeScript 编译成 ESM JavaScript。
+  // 客户端面板（浏览器 bundle）另行用打包器处理，不在此配置范围内。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "engine", "test", "src/**/*.js"]
+}
