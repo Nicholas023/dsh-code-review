@@ -23,6 +23,7 @@ import { listTasks, readTask, requestCancellation } from '../store/task-store.js
 import { presentSubmitted, presentTask, presentTaskList } from './present.js'
 import { ensureKernel } from './process.js'
 import { submitReview, type ReviewArgs } from './submit.js'
+import { applyConfigPatch, presentSetConfigResult } from './set-config.js'
 
 /** 插件名（Cordis 识别用）。 */
 export const name = 'dsh-code-review'
@@ -33,6 +34,7 @@ export const inject = ['tools']
 /** 工具名。 */
 export const TOOL_NAME = 'code_review'
 export const STATUS_TOOL_NAME = 'code_review_status'
+export const SET_CONFIG_TOOL_NAME = 'code_review_set_config'
 
 /** Cordis 上下文的最小形状（避免依赖宿主类型包）。 */
 interface Ctx {
@@ -162,6 +164,43 @@ function createReviewTool(ctx: Ctx) {
   }
 }
 
+/** 创建 code_review_set_config 工具。 */
+function createSetConfigTool() {
+  return {
+    name: SET_CONFIG_TOOL_NAME,
+    description: [
+      '修改插件配置。传 { "review.endpoint": "...", "budget.maxAgentRounds": 3 } 这样的扁平键值对。',
+      '字段会被逐条校验：未知字段、只读字段、类型不符都会被拒绝并回显原因。',
+      '写入时只改动被点名的路径，配置文件里的其他内容（含未知字段）原样保留。',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        patch: {
+          type: 'object',
+          description: '扁平键值对，键形如 section.key',
+          additionalProperties: true,
+        },
+      },
+      required: ['patch'],
+    },
+    output: {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+      render: (_args: unknown, value: { text?: string }) => [{ type: 'text', text: value?.text ?? String(value) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args: { patch?: Record<string, unknown> }) {
+      const patch = args?.patch
+      if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+        return { ok: false, text: '❌ patch 必须是对象，形如 { "review.model": "deepseek-flash" }' }
+      }
+      const dshRoot = resolveDshRoot()
+      const result = applyConfigPatch(patch, dshRoot)
+      return { ok: result.ok, text: presentSetConfigResult(result) }
+    },
+  }
+}
+
 /** 创建 code_review_status 工具。 */
 function createStatusTool() {
   return {
@@ -201,6 +240,7 @@ export function apply(ctx: Ctx): () => void {
   }
   register(createReviewTool(ctx), TOOL_NAME)
   register(createStatusTool(), STATUS_TOOL_NAME)
+  register(createSetConfigTool(), SET_CONFIG_TOOL_NAME)
 
   // 斜杠命令（可选服务，缺失不阻塞工具）
   try {
