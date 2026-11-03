@@ -150,7 +150,28 @@ mkdirSync(outDir, { recursive: true })
 const outPath = join(outDir, 'manifest.json')
 writeFileSync(outPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
 
-// ── 7. 报告 ──
+// ── 7. 打包（--pack 时）──
+//
+// 用系统 tar：这是唯一能保证「解压后权限与目录结构不变」的方案，
+// 也比手写 zip 容器可靠。打包只是把 dist + 元数据装进一个文件，
+// 不做任何转换 —— 发布产物必须与 manifest 记录的哈希完全一致。
+if (process.argv.includes('--pack') && failures.length === 0) {
+  const archive = join(outDir, 'dsh-code-review-' + String(manifest.version) + '.tar.gz')
+  try {
+    const inputs = ['dist', 'package.json', 'README.md', 'UPGRADING.md', 'CHANGELOG.md', 'LICENSE', 'NOTICE', 'cordis.patch.yml']
+      .filter((p) => existsSync(join(ROOT, p)))
+    execFileSync('tar', ['-czf', archive, ...inputs], { cwd: ROOT, stdio: 'pipe' })
+    manifest.archive = { path: relative(ROOT, archive), bytes: statSync(archive).size }
+    writeFileSync(outPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
+    if (!process.argv.includes('--json')) {
+      console.log('归档：' + relative(ROOT, archive) + '（' + (statSync(archive).size / 1024).toFixed(1) + ' KB）')
+    }
+  } catch (error) {
+    failures.push('打包失败：' + String(error.message ?? error))
+  }
+}
+
+// ── 8. 报告 ──
 if (process.argv.includes('--json')) {
   console.log(JSON.stringify(manifest, null, 2))
 } else {
