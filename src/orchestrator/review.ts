@@ -76,6 +76,20 @@ function thresholdsOf(config: ConfigV2): SizingThresholds {
   return config.sizing
 }
 
+/**
+ * 决定本次评审的规模档位。
+ *
+ * 为什么 scan 要单独处理：scan 枚举的是文件清单，**没有 diff**，
+ * 于是 estimateFileTokens 恒为 0，classifySize 必然判成小档 ——
+ * 而小档的策略是「不给工具、只读 diff」，结果就是模型手上什么都没有，
+ * 评审变成盲审。scan 的真实规模应该由文件数量与后续按需读取决定，
+ * 所以固定按大档处理：主 agent 拿清单 + 工具，正文靠 read 按需取。
+ */
+export function decideTier(command: 'review' | 'scan', totalTokens: number, thresholds: SizingThresholds): SizeTier {
+  if (command === 'scan') return 'large'
+  return classifySize(totalTokens, thresholds)
+}
+
 /** 支持的扩展名（首发集合，与 rules.ts 对齐）。 */
 const SUPPORTED_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.go', '.py', '.java', '.kt', '.json', '.md']
 
@@ -136,12 +150,15 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
   // ── 3. 算规模与档位 ──
   const t = thresholdsOf(config)
   const totalTokens = selection.selected.reduce((sum, f) => sum + estimateFileTokens(f), 0)
-  const tier = classifySize(totalTokens, t)
+  const tier = decideTier(scope.command, totalTokens, t)
   const policy = mainAgentPolicy(tier)
   input.onProgress?.({ stage: 'sizing', detail: tier + ' / ' + String(totalTokens) + ' tokens' })
 
-  // 大档 + scan：主 agent 不拿正文（否则上下文直接爆）
-  const mainFiles = policy.depth === 'outline' ? [] : selection.selected
+  // 大档：主 agent 只拿清单、不拿正文（否则上下文直接爆），
+  // 正文它可以自己用 tools.read 按需取。
+  const mainFiles = policy.depth === 'outline'
+    ? selection.selected.map((f) => ({ ...f, hunks: [] }))
+    : selection.selected
 
   // ── 4. 主 agent ──
   const rules = resolveRules(selection.selected.map((f) => f.newPath))

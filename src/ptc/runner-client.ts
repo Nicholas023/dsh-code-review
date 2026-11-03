@@ -44,6 +44,33 @@ export interface RunnerResult {
   readonly elapsedMs: number
 }
 
+
+/**
+ * runner 子进程允许看到的环境变量白名单。
+ *
+ * 为什么必须显式给 env：Node 的 spawn 默认**继承父进程全部环境变量**。
+ * 内核进程为了调 LLM 会持有 API key，如果原样继承，模型写的那段程序
+ * 只要执行 `process.env.X` 就能把 key 读出来 —— 而它还可能在结果里
+ * 把它打印回上下文，最后进报告。
+ *
+ * 白名单只留「跑一个 Node 进程所必需」的变量：定位系统 DLL、临时目录、编码。
+ * 任何形似凭据的变量都不在其中。
+ */
+const RUNNER_ENV_ALLOWLIST = [
+  'PATH', 'Path', 'PATHEXT', 'COMSPEC', 'SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR',
+  'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'LANG', 'LC_ALL', 'NODE_OPTIONS',
+]
+
+/** 从父进程环境里挑出白名单变量（导出供测试验证隔离效果）。 */
+export function runnerEnv(): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {}
+  for (const key of RUNNER_ENV_ALLOWLIST) {
+    const value = process.env[key]
+    if (typeof value === 'string') out[key] = value
+  }
+  return out
+}
+
 /** stdout 上限：防止程序往 stdout 灌数据撑爆父进程内存。 */
 const STDOUT_LIMIT = 4 * 1024 * 1024
 
@@ -67,7 +94,12 @@ export function runCodeProgram(opts: RunnerOptions, request: RunnerRequest): Pro
     const child = spawn(
       opts.nodePath,
       ['--max-old-space-size=' + String(opts.memoryMb), opts.entryPath],
-      { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        // 只给最小环境：绝不让模型代码看到内核持有的凭据
+        env: runnerEnv(),
+      },
     )
 
     let stdout = ''

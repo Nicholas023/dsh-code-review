@@ -100,11 +100,28 @@ export async function runClaimedTask(record: TaskRecord, deps: ExecuteDeps, dshR
   const nowOf = deps.now
   let current = record
 
+  // 认领后立刻检查一次：用户可能在内核启动的那几秒里就点了取消
+  const fresh = readTask(current.id, dshRoot)
+  if (fresh !== null && fresh.cancelRequested) {
+    return updateTask(current.id, (cur) => transition(cur, 'cancelled', nowOf(), { cancelRequested: true }), dshRoot)
+  }
+
   // 从 recovering/claimed 推进到 preparing
   current = updateTask(current.id, (cur) => transition(cur, 'preparing', nowOf()), dshRoot)
   current = updateTask(current.id, (cur) => transition(cur, 'reviewing', nowOf()), dshRoot)
 
   const outcome = await executeTask(current, deps)
+
+  // 执行期间用户可能点了取消。此时评审已经跑完（token 已经花掉），
+  // 但如果还按 completed 落账，用户会以为「取消没生效」。
+  // 明确标成 cancelled，让状态与用户的意图一致。
+  const afterRun = readTask(current.id, dshRoot)
+  if (afterRun !== null && afterRun.cancelRequested) {
+    return updateTask(current.id, (cur) => transition(cur, 'cancelled', nowOf(), {
+      cancelRequested: true,
+      ...(outcome.summary === null ? {} : { summary: outcome.summary }),
+    }), dshRoot)
+  }
 
   if (!outcome.ok) {
     // 收窄到局部常量，避免闭包里重复判定 null
