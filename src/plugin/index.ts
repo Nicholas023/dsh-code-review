@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ensureLegacyMigrated } from '../config/migrate-legacy.js'
 import { readConfigFile } from '../config/store.js'
 import { configFilePath, resolveDshRoot } from '../store/paths.js'
 import { listTasks, readTask } from '../store/task-store.js'
@@ -50,6 +51,8 @@ function distRoot(): string {
 
 /** 读取当前配置（每次调用重读，热生效）。 */
 function currentConfig(dshRoot: string) {
+  // 幂等：只有「新文件不存在且旧文件存在」时才真的搬，搬完再读
+  ensureLegacyMigrated(dshRoot)
   return readConfigFile(configFilePath(dshRoot)).config
 }
 

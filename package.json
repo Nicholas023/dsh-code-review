@@ -1,40 +1,29 @@
 {
   "name": "dsh-code-review",
-  "version": "0.1.3",
-  "description": "智能代码审查插件：把引擎 codecheck（open-code-review 的 fork）接入 DSH —— 对仓库 diff/扫描执行安全脱敏、找 bug、冗余与无关代码三个固定视角的评审，会话内返回问题清单并落一份报告文件留档。默认沿用会话模型（DeepSeek-V41-Flash），设置面板可另选 DSH 中已配置的评审模型。",
+  "version": "0.2.0",
+  "description": "智能代码审查插件（0.2.0）：把自研 Node/TypeScript 审查内核接入 DSH —— 对仓库 diff / 全仓扫描执行安全脱敏、找 bug、冗余与无关代码三个固定视角的评审，产出 Markdown + JSON 双报告。内核独立进程运行、PTC 模式（模型写程序调用只读工具）、主/子 agent 分层，token 开销可解释。",
   "type": "module",
-  "main": "src/index.js",
+  "main": "dist/plugin/index.js",
   "exports": {
-    ".": "./src/index.js",
-    "./client": "./client.js",
-    "./std-facet": "./std-facet.js",
+    ".": "./dist/plugin/index.js",
     "./package.json": "./package.json"
   },
   "files": [
-    "src",
-    "scripts",
-    "client.js",
-    "std-facet.js",
-    "dsh-plugin.json",
+    "dist",
     "cordis.patch.yml",
+    "dsh-plugin.json",
     "README.md",
     "LICENSE",
     "NOTICE"
   ],
   "scripts": {
-    "check": "node --check src/index.js && node --check src/config.js && node --check src/settings-schema.js && node --check src/plugin-config.js && node --check src/exec-context.js && node --check src/result-text.js && node --check src/runner.js && node --check src/report.js && node --check src/sensitive-list.js && node --check src/model-provider.js && node --check src/credentials.js && node --check src/review-exec.js && node --check src/task-book.js && node --check src/task-api.js && node --check src/serve-entry.js && node --check src/file-config.js && node --check src/set-config-tool.js && node --check client.js && node --check std-facet.js",
-    "smoke": "node scripts/cordis-entry-smoke.mjs",
-    "unit": "node scripts/unit-smoke.mjs && node scripts/file-config-smoke.mjs",
-    "e2e-engine": "node scripts/engine-e2e-smoke.mjs",
-    "e2e-plugin": "node scripts/plugin-e2e-smoke.mjs",
-    "e2e-switch": "node scripts/switch-model-e2e.mjs",
-    "e2e-sensitive": "node scripts/sensitive-e2e-smoke.mjs",
-    "selfcheck": "node scripts/cordis-entry-smoke.mjs && node scripts/client-bundle-smoke.mjs && node scripts/unit-smoke.mjs && node scripts/file-config-smoke.mjs && node scripts/task-api-smoke.mjs",
-    "link-deps": "node scripts/link-deps.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "build:kernel": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "node scripts/benchmark-tokens.mjs",
+    "check": "npm run typecheck && npm run test",
+    "verify": "npm run typecheck && npm run build && npm run test"
   },
   "keywords": [
     "dsh",
@@ -56,7 +45,7 @@
   },
   "homepage": "https://github.com/Nicholas023/dsh-code-review#readme",
   "engines": {
-    "node": ">=20",
+    "node": ">=22",
     "dsh": ">=0.2.0-rc.2 <0.3.0"
   },
   "dsh": {
@@ -66,11 +55,6 @@
     "client": {
       "platform": "web"
     }
-  },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.4",
-    "ajv": "^8.20.0",
-    "js-yaml": "^4.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
