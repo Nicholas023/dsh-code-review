@@ -1,0 +1,17 @@
+{
+  // dsh-code-review 0.2.0 —— 浏览器端类型检查配置。
+  //
+  // 与宿主端（tsconfig.json）的关键差异：
+  //  - 有 DOM 库、有 JSX；
+  //  - **没有 node 类型** —— 客户端代码一旦 import node:fs 就会在这里报错，
+  //    这正是我们要的：把「不小心引入服务端依赖」拦在编译期。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": [],
+    "noEmit": true
+  },
+  "include": ["src/client/**/*.ts", "src/client/**/*.tsx", "src/settings/fields.ts"],
+  "exclude": ["node_modules", "dist", "test"]
+}

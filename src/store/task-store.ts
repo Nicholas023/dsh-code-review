@@ -17,8 +17,33 @@ import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
 import { TASK_SCHEMA_VERSION } from '../domain/version.js'
 import { KernelError } from '../domain/errors.js'
 import { TERMINAL_STAGES, transition, type TaskRecord, type TaskStage, type TaskScope } from '../domain/task.js'
+import { validateWith } from '../domain/validate.js'
 import { readJsonOrNull, writeJsonAtomic } from './atomic.js'
 import { taskPath, tasksDir } from './paths.js'
+
+/**
+ * 任务卡的最小结构约束。
+ *
+ * 只强制「没有它就无法理解这张卡」的字段：坏掉的卡如果被当成正常卡用，
+ * 上层会读到 undefined.repoPath 之类的崩溃。其余字段靠 additionalProperties
+ * 放行 —— 宁可多容忍，也不要因为加了个字段就让旧卡全部读不出来。
+ */
+const TASK_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  required: ['id', 'stage', 'revision'],
+  properties: {
+    id: { type: 'string', minLength: 1 },
+    stage: {
+      type: 'string',
+      enum: ['queued', 'claimed', 'preparing', 'reviewing', 'aggregating', 'reporting', 'completed', 'failed', 'cancelled', 'recovering'],
+    },
+    revision: { type: 'number' },
+    schemaVersion: { type: 'number' },
+    createdAt: { type: 'string' },
+    scope: { type: 'object' },
+  },
+  additionalProperties: true,
+}
 
 /** 新建任务的输入。 */
 export interface CreateTaskInput {
@@ -61,9 +86,21 @@ export function createTask(input: CreateTaskInput, dshRoot?: string): TaskRecord
   return record
 }
 
-/** 读取任务卡；不存在或损坏返回 null。 */
+/**
+ * 读取任务卡；文件不存在、JSON 损坏、或结构不合法都返回 null。
+ *
+ * 为什么校验而不是直接 as TaskRecord：任务卡是跨进程、可被人工编辑的文件，
+ * 把它当可信输入会让坏数据在很远的地方才炸（比如编排层读 scope.repoPath）。
+ * 在这里拦住，失败表现为「任务不存在」，调用方有现成的处理分支。
+ */
 export function readTask(id: string, dshRoot?: string): TaskRecord | null {
-  return readJsonOrNull<TaskRecord>(taskPath(id, dshRoot))
+  const raw = readJsonOrNull<unknown>(taskPath(id, dshRoot))
+  if (raw === null) return null
+  try {
+    return validateWith<TaskRecord>('dsh-task', TASK_SCHEMA, raw)
+  } catch {
+    return null
+  }
 }
 
 /**

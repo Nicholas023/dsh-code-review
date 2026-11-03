@@ -6,6 +6,7 @@
   "main": "dist/plugin/index.js",
   "exports": {
     ".": "./dist/plugin/index.js",
+    "./client": "./dist/client/index.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -17,14 +18,17 @@
     "NOTICE"
   ],
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
-    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json && npm run typecheck:client",
+    "build": "npm run build:kernel && npm run build:client",
     "test": "vitest run",
     "test:watch": "vitest",
     "bench": "node scripts/benchmark-tokens.mjs",
     "check": "npm run typecheck && npm run test",
     "verify": "npm run typecheck && npm run build && npm run test",
-    "release:check": "npm run build && node scripts/release.mjs"
+    "release:check": "npm run build && node scripts/release.mjs",
+    "build:kernel": "tsc -p tsconfig.build.json",
+    "build:client": "node scripts/build-client.mjs",
+    "typecheck:client": "tsc -p tsconfig.client.json"
   },
   "keywords": [
     "dsh",
@@ -54,12 +58,29 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "@types/react": "^18.3.31",
+    "react": "^18.3.1",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "ajv": "^8.20.0"
   }
 }
