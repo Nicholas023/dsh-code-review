@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { ensureLegacyMigrated } from '../config/migrate-legacy.js'
 import { readConfigFile } from '../config/store.js'
 import { configFilePath, resolveDshRoot } from '../store/paths.js'
-import { listTasks, readTask } from '../store/task-store.js'
+import { listTasks, readTask, requestCancellation } from '../store/task-store.js'
 import { presentSubmitted, presentTask, presentTaskList } from './present.js'
 import { ensureKernel } from './process.js'
 import { submitReview, type ReviewArgs } from './submit.js'
@@ -103,6 +103,21 @@ export function statusPayload(taskId: string | undefined): string {
   return presentTask(record)
 }
 
+/** 取消任务并返回回执。 */
+export function cancelPayload(taskId: string | undefined): string {
+  const id = typeof taskId === 'string' ? taskId.trim() : ''
+  if (id === '') return '取消需要指定 task_id。'
+  const dshRoot = resolveDshRoot()
+  try {
+    const next = requestCancellation(id, new Date().toISOString(), dshRoot)
+    if (next.stage === 'cancelled') return '🚫 任务 ' + id + ' 已取消。'
+    return '⏳ 已请求取消任务 ' + id + '，内核会在下一个检查点停止。当前阶段：' + next.stage
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return '❌ 取消失败：' + message
+  }
+}
+
 /** 创建 code_review 工具。 */
 function createReviewTool(ctx: Ctx) {
   return {
@@ -151,10 +166,13 @@ function createReviewTool(ctx: Ctx) {
 function createStatusTool() {
   return {
     name: STATUS_TOOL_NAME,
-    description: '查询评审任务状态与结果。不传 task_id 时列出最近任务。',
+    description: '查询评审任务状态与结果。不传 task_id 时列出最近任务；传 cancel=true 可取消指定任务。',
     parameters: {
       type: 'object',
-      properties: { task_id: { type: 'string', description: '任务 id' } },
+      properties: {
+        task_id: { type: 'string', description: '任务 id' },
+        cancel: { type: 'boolean', description: '设为 true 时取消该任务（排队中立即生效；执行中会在内核检查点停下）' },
+      },
       required: [],
     },
     output: {
@@ -162,7 +180,10 @@ function createStatusTool() {
       render: (_args: unknown, value: { text?: string }) => [{ type: 'text', text: value?.text ?? String(value) }],
     },
     isConcurrencySafe: () => true,
-    async execute(args: { task_id?: string }) {
+    async execute(args: { task_id?: string; cancel?: boolean }) {
+      if (args?.cancel === true) {
+        return { ok: true, text: cancelPayload(args?.task_id) }
+      }
       return { ok: true, text: statusPayload(args?.task_id) }
     },
   }

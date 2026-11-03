@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
 import { TASK_SCHEMA_VERSION } from '../domain/version.js'
 import { KernelError } from '../domain/errors.js'
-import { transition, type TaskRecord, type TaskStage, type TaskScope } from '../domain/task.js'
+import { TERMINAL_STAGES, transition, type TaskRecord, type TaskStage, type TaskScope } from '../domain/task.js'
 import { readJsonOrNull, writeJsonAtomic } from './atomic.js'
 import { taskPath, tasksDir } from './paths.js'
 
@@ -143,4 +143,27 @@ export function deleteTask(id: string, dshRoot?: string): void {
 /** 确保任务目录存在。 */
 export function ensureTasksDir(dshRoot?: string): void {
   mkdirSync(tasksDir(dshRoot), { recursive: true })
+}
+
+/**
+ * 请求取消一个任务。
+ *
+ * 语义分两种情况（这是刻意的，不是简化）：
+ *  - 仍在 queued：直接转 cancelled（内核还没碰它，取消是立即的）；
+ *  - 已在执行：只设置 cancelRequested 标记，由内核在下一个检查点处理。
+ *    标记与「已取消」是两件事 —— 把标记当结果会让用户以为线程停了，其实还在烧 token。
+ *
+ * @returns 更新后的记录
+ */
+export function requestCancellation(id: string, now: string, dshRoot?: string): TaskRecord {
+  return updateTask(id, (cur) => {
+    if (cur.stage === 'queued') {
+      return transition(cur, 'cancelled', now, { cancelRequested: true })
+    }
+    if (TERMINAL_STAGES.has(cur.stage)) {
+      throw new KernelError('INPUT_INVALID_ARGUMENT', '任务已结束（' + cur.stage + '），无法取消：' + id)
+    }
+    // 执行中：只打标记，等内核在检查点停下
+    return { ...cur, cancelRequested: true, revision: cur.revision + 1, updatedAt: now }
+  }, dshRoot)
 }

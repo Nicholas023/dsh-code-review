@@ -56,6 +56,15 @@ export function claimNextTask(ownerNonce: string, now: string, dshRoot?: string,
   const tasks = listTasks(dshRoot)
   const nowMs = Date.parse(now)
   for (const t of tasks) {
+    // 已请求取消的排队任务：不认领，直接标记结束（用户不必等内核拉起）
+    if (t.stage === 'queued' && t.cancelRequested) {
+      try {
+        updateTask(t.id, (cur) => transition(cur, 'cancelled', now), dshRoot)
+      } catch {
+        // 别人先处理了，继续看下一个
+      }
+      continue
+    }
     // ① 正常的 queued：直接抢
     if (t.stage === 'queued') {
       try {
