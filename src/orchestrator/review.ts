@@ -31,6 +31,7 @@ import { resolveRules } from '../prompt/rules.js'
 import { selectFiles, estimateFileTokens, type ExcludedFile } from '../selection/select.js'
 import { runAgentLoop } from '../agent/loop.js'
 import type { RawFinding } from '../agent/result-parser.js'
+import { resolveLocation } from '../report/line-resolver.js'
 
 /** 编排输入。 */
 export interface ReviewInput {
@@ -268,6 +269,21 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
     findings.push(...child.result.findings)
   }
 
+  // ── 5.5 行号定位 ──
+  // 只有这里同时握有「模型给的行号」和「真实 diff」，所以定位只能在这里做。
+  // 交给执行层（它看不到 diff）会导致每条发现都被标成 unresolved。
+  const diffByPath = new Map<string, FileDiff>()
+  for (const f of selection.selected) diffByPath.set(f.newPath.replace(/\\/g, '/'), f)
+  const locatedFindings: RawFinding[] = findings.map((f) => {
+    const diff = diffByPath.get(f.path.replace(/\\/g, '/'))
+    const loc = resolveLocation(diff, f.line, f.evidence)
+    return {
+      ...f,
+      line: loc.lineStart ?? f.line,
+      lineSource: loc.lineSource,
+    }
+  })
+
   // ── 6. 汇总 ──
   const stats = summarizeDiff(selection.selected)
   const status = main.stopReason === 'finished' ? 'completed' : 'partial'
@@ -277,7 +293,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
 
   return {
     status,
-    findings,
+    findings: locatedFindings,
     sensitiveFiles: selection.sensitive,
     excluded: selection.excluded,
     coverage: { reviewed: selection.selected.length, total: files.length },

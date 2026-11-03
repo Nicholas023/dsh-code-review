@@ -10,7 +10,7 @@
  * 宁可丢弃一条可疑发现，也不要让脏数据流进报告。
  */
 
-import type { FindingCategory, FindingSeverity } from '../domain/finding.js'
+import type { FindingCategory, FindingSeverity, LineSource } from '../domain/finding.js'
 
 /** 模型返回的原始发现（未经行号定位与去重）。 */
 export interface RawFinding {
@@ -23,6 +23,15 @@ export interface RawFinding {
   readonly explanation: string
   readonly recommendation: string
   readonly confidence: number
+  /**
+   * 行号可信度。
+   *
+   * 解析阶段只能给一个乐观默认值（模型给了行号就当 exact），
+   * **真正的判定必须在编排层做** —— 那里才有 diff，能验证这个行号是不是
+   * 真的落在新增行上。执行层如果拿不到 diff 就贸然标 unresolved，
+   * 会让每一条正常发现都被显示成「位置未定位」。
+   */
+  readonly lineSource: LineSource
 }
 
 /** 子任务请求（主 agent 要求深挖的区域）。 */
@@ -94,6 +103,7 @@ function parseFinding(raw: unknown, issues: string[]): RawFinding | null {
     explanation: str(o.explanation).slice(0, 4000),
     recommendation: str(o.recommendation).slice(0, 2000),
     confidence,
+    lineSource: 'exact',
   }
 }
 

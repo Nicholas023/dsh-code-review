@@ -21,7 +21,6 @@ import type { LlmClientOptions } from '../llm/client.js'
 import { runReview } from '../orchestrator/review.js'
 import type { RunnerOptions } from '../ptc/runner-client.js'
 import { fingerprint } from '../report/dedupe.js'
-import { resolveLocation } from '../report/line-resolver.js'
 import { renderMarkdown } from '../report/markdown.js'
 import { redactDeep } from '../report/redact.js'
 import type { ReviewReport } from '../report/schema.js'
@@ -182,13 +181,13 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
   // 收敛 finding：行号定位 + 指纹
   deps.onProgress?.('aggregating')
   const findings: Finding[] = out.findings.map((raw, i) => {
-    const resolved = resolveLocation(undefined, raw.line, raw.evidence)
     return {
       id: 'f-' + String(i + 1),
       path: raw.path,
       lineStart: raw.line,
       lineEnd: raw.line,
-      lineSource: resolved.lineSource,
+      // 定位已在编排层用真实 diff 完成，这里只透传
+      lineSource: raw.lineSource,
       category: raw.category as FindingCategory,
       severity: raw.severity as FindingSeverity,
       title: raw.title,
