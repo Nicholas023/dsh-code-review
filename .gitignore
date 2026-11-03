@@ -52,6 +52,8 @@ credentials.txt
 # ---------- Node / DSH 插件 ----------
 node_modules/
 dist/
+# 发布产物（scripts/release.mjs 生成）
+release/
 build/
 *.log
 npm-debug.log*
