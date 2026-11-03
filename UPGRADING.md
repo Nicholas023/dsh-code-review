@@ -96,8 +96,10 @@ git checkout archive/0.1.3-go-engine
 
 ## 已知限制（0.2.0 首发）
 
-1. **没有图形设置面板**。用 `code_review_set_config` 工具或直接编辑 `config.json`。
-   字段说明见 `src/settings/schema.ts` 的 `CONFIG_FIELDS`。
+1. **设置面板未经实机验证**。客户端组件（`src/client/`）已实现并打包（15.9 KB），
+   加载约定按 DSH 源码确认（`exports["./client"]` + `dsh.client.platform=web`），
+   但「在真实 DSH 里点开面板、改动、保存生效」这条链路尚未实测。
+   如果面板没出现，用 `code_review_set_config` 工具或直接编辑 `config.json` 兜底。
 2. **token 基准只有估算**。`npm run bench` 给出的是量级（不联网）；
    真实数字需要配 `BENCH_*` 环境变量跑 `--real`。
 3. **没有实机验收记录**。代码层面 373 个测试全绿，但「装进 DSH 跑通一次真实评审」

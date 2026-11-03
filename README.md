@@ -59,7 +59,12 @@ npm run build
 
 ## 配置
 
-配置文件：`~/.dsh/dsh-code-review/config.json`（首次启动自动迁移 0.1.x 的 `plugin-config.json`）。
+三种方式，效果等价：
+
+1. **设置面板**（推荐）：DSH「插件」页 → dsh-code-review 行 → 配置。
+   面板按分组渲染全部字段，改动先存草稿，点「保存」才写入。
+2. **会话工具**：`code_review_set_config({ patch: { "review.model": "..." } })`
+3. **直接编辑**：`~/.dsh/dsh-code-review/config.json`（首次启动自动迁移 0.1.x 的 `plugin-config.json`）
 
 **端点与凭据必须在设置里显式填写**：
 
@@ -68,6 +73,8 @@ npm run build
 | `review.endpoint` | 模型端点，如 `https://api.deepseek.com` |
 | `review.model` | 模型标识，如 `deepseek-flash` |
 | `review.credentialRef` | **凭据引用名**（环境变量名），不填明文 key |
+
+> 面板的「保存」只提交**改动过的字段** —— 没动的字段不会被重写，避免覆盖别人刚存的值。
 
 > 红线：端点或凭据缺失时，评审会在**发出任何请求之前**失败并提示去配置，
 > 绝不隐式调用任何默认端点。
