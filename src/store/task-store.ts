@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 dsh-code-review contributors
+
+/**
+ * task-store.ts —— 任务卡的持久化（一任务一文件，带乐观并发）。
+ *
+ * 为什么用文件而不是数据库：任务簿要在**没有服务端**的前提下被两个进程
+ * （插件与内核）同时读写。文件 + 原子 rename 是最小可用的跨进程协议；
+ * 端口、socket、数据库连接都会引入「谁先启动」的时序问题。
+ *
+ * 并发控制：每次写递增 revision，写前比对期望版本。
+ * 不匹配说明别人改过了，此时**拒绝写入并报 STORAGE_CONCURRENT_MODIFICATION**，
+ * 而不是覆盖 —— 覆盖会悄悄丢掉对方的阶段推进。
+ */
+
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
+import { TASK_SCHEMA_VERSION } from '../domain/version.js'
+import { KernelError } from '../domain/errors.js'
+import { transition, type TaskRecord, type TaskStage, type TaskScope } from '../domain/task.js'
+import { readJsonOrNull, writeJsonAtomic } from './atomic.js'
+import { taskPath, tasksDir } from './paths.js'
+
+/** 新建任务的输入。 */
+export interface CreateTaskInput {
+  readonly id: string
+  readonly scope: TaskScope
+  readonly config: Readonly<Record<string, unknown>>
+  readonly requestor: { readonly sessionId: string } | null
+  /** 创建时间（由调用方注入，便于测试）。 */
+  readonly now: string
+}
+
+/**
+ * 创建任务卡（queued）。
+ * @throws KernelError(STORAGE_WRITE_FAILED) 写入失败时
+ */
+export function createTask(input: CreateTaskInput, dshRoot?: string): TaskRecord {
+  const record: TaskRecord = {
+    id: input.id,
+    schemaVersion: TASK_SCHEMA_VERSION,
+    revision: 0,
+    stage: 'queued',
+    createdAt: input.now,
+    updatedAt: input.now,
+    claimedAt: null,
+    heartbeatAt: null,
+    completedAt: null,
+    owner: null,
+    cancelRequested: false,
+    failure: null,
+    requestor: input.requestor,
+    scope: input.scope,
+    config: input.config,
+    summary: null,
+  }
+  try {
+    writeJsonAtomic(taskPath(input.id, dshRoot), record)
+  } catch (error) {
+    throw new KernelError('STORAGE_WRITE_FAILED', '创建任务卡失败：' + (error instanceof Error ? error.message : String(error)))
+  }
+  return record
+}
+
+/** 读取任务卡；不存在或损坏返回 null。 */
+export function readTask(id: string, dshRoot?: string): TaskRecord | null {
+  return readJsonOrNull<TaskRecord>(taskPath(id, dshRoot))
+}
+
+/**
+ * 更新任务卡（乐观并发）。
+ * @param id 任务 id
+ * @param mutate 接收当前记录，返回新记录（通常用 transition）
+ * @throws KernelError(STORAGE_TASK_NOT_FOUND | STORAGE_CONCURRENT_MODIFICATION | STORAGE_WRITE_FAILED)
+ */
+export function updateTask(id: string, mutate: (current: TaskRecord) => TaskRecord, dshRoot?: string): TaskRecord {
+  const current = readTask(id, dshRoot)
+  if (current === null) {
+    throw new KernelError('STORAGE_TASK_NOT_FOUND', '任务不存在：' + id)
+  }
+  const next = mutate(current)
+  // CAS：mutate 必须基于 current 的 revision 递增；若调用方擅自改了 revision 之外的东西
+  // 或没递增，这里兜住
+  if (next.revision <= current.revision) {
+    throw new KernelError('INTERNAL_INVARIANT_VIOLATED', '更新任务卡未递增 revision：' + id)
+  }
+  // 写前再读一次，缩小竞态窗口（先读-改-再读-写）
+  const beforeWrite = readTask(id, dshRoot)
+  if (beforeWrite === null || beforeWrite.revision !== current.revision) {
+    throw new KernelError('STORAGE_CONCURRENT_MODIFICATION', '任务卡被其他进程修改：' + id)
+  }
+  try {
+    writeJsonAtomic(taskPath(id, dshRoot), next)
+  } catch (error) {
+    throw new KernelError('STORAGE_WRITE_FAILED', '写入任务卡失败：' + (error instanceof Error ? error.message : String(error)))
+  }
+  return next
+}
+
+/**
+ * 推进任务阶段（常用路径的便捷封装）。
+ */
+export function advanceTask(
+  id: string,
+  to: TaskStage,
+  now: string,
+  patch: Partial<Pick<TaskRecord, 'failure' | 'summary' | 'owner' | 'cancelRequested'>> = {},
+  dshRoot?: string,
+): TaskRecord {
+  return updateTask(id, (cur) => transition(cur, to, now, patch), dshRoot)
+}
+
+/**
+ * 列出任务（按创建时间倒序，最新在前）。
+ * @param limit 最多返回多少条（默认全部）
+ */
+export function listTasks(dshRoot?: string, limit?: number): TaskRecord[] {
+  const dir = tasksDir(dshRoot)
+  if (!existsSync(dir)) return []
+  let names: string[]
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith('.json'))
+  } catch {
+    return []
+  }
+  const out: TaskRecord[] = []
+  for (const name of names) {
+    const rec = readJsonOrNull<TaskRecord>(taskPath(name.slice(0, -5), dshRoot))
+    if (rec !== null && typeof rec.id === 'string') out.push(rec)
+  }
+  out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+  return limit === undefined ? out : out.slice(0, limit)
+}
+
+/** 删除任务卡（仅供测试与清理）。 */
+export function deleteTask(id: string, dshRoot?: string): void {
+  try {
+    unlinkSync(taskPath(id, dshRoot))
+  } catch {
+    // 不存在视为已删除
+  }
+}
+
+/** 确保任务目录存在。 */
+export function ensureTasksDir(dshRoot?: string): void {
+  mkdirSync(tasksDir(dshRoot), { recursive: true })
+}
