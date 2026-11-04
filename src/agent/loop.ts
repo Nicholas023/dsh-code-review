@@ -175,6 +175,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           messages,
           tools,
           ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+          // 评审必须可复现：同一份代码两次跑出不同结论，用户无从判断哪个可信。
+          // 实测同一仓库、同一配置两次扫描，一次 12 条一次 0 条 —— 差别只来自采样温度。
+          temperature: 0,
         },
       )
     } catch (error) {
@@ -257,11 +260,68 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     opts.onProgress?.({ round: rounds, kind: 'round-end' })
   }
 
+  // 轮次用尽。这里**必须**再问一次模型，不能直接返回空结果。
+  //
+  // 为什么：评审结论只从 finish 工具里取。如果模型把轮次全花在读代码上、
+  // 没来得及调用 finish，直接返回就是「0 个问题 + 已完成」——一次没跑完的评审
+  // 会被当成干净结论。实机踩过：同一个仓库两次扫描，一次 12 条一次 0 条。
+  //
+  // 收尾请求只给 finish 一个工具：这轮不能再花预算去 run_code，否则就是
+  // 又一轮「差一点」。失败也不改变 stopReason，仍是 max-rounds（状态仍是 partial），
+  // 只是尽量把已有发现带出来。
+  const salvaged = await salvageFindings(opts, messages, usage)
+  if (salvaged !== null) {
+    return {
+      result: salvaged,
+      rounds,
+      stopReason: 'max-rounds',
+      usage,
+      error: null,
+    }
+  }
+
   return {
     result: { findings: [], needsMoreContext: [], childRequests: [], issues: ['达到最大轮次，评审未完成'] },
     rounds,
     stopReason: 'max-rounds',
     usage,
     error: null,
+  }
+}
+
+/**
+ * 轮次耗尽后的收尾请求：只要结论，不要调用代码。
+ * @param opts     循环选项
+ * @param messages 当前对话（会被追加一条收尾指令）
+ * @param usage    用量累加器
+ * @returns 解析出的结论；模型仍不调用 finish 时返回 null
+ */
+async function salvageFindings(
+  opts: AgentLoopOptions,
+  messages: ChatMessage[],
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; requests: number },
+): Promise<ParsedResult | null> {
+  messages.push({
+    role: 'user',
+    content: '轮次预算已用尽。请立刻调用 finish 提交你目前已经确认的发现（没有发现就提交空列表），不要再调用 run_code。',
+  })
+  const maxTokens = maxTokensFor(opts.maxOutputTokens)
+  try {
+    const res = await callChatCompletion(opts.llm, {
+      model: opts.model,
+      messages,
+      tools: [FINISH_TOOL],
+      ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+      temperature: 0,
+    })
+    usage.requests += 1
+    addUsage(usage, res.usage)
+    const calls = res.response.choices?.[0]?.message?.tool_calls ?? []
+    const finish = calls.find((c) => c.function.name === 'finish')
+    if (finish === undefined) return null
+    return parseResult(parseArgs(finish))
+  } catch {
+    // 收尾失败不影响主流程：仍然返回 max-rounds，只是没有额外发现
+    return null
   }
 }

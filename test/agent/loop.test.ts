@@ -177,3 +177,46 @@ describe('输出预算 → max_tokens', () => {
     expect(sent.max_tokens).toBe(321)
   }, 60_000)
 })
+
+describe('可复现性与轮次耗尽后的抢救', () => {
+  it('请求固定 temperature: 0（评审结论必须可复现）', async () => {
+    // 实测教训：同一仓库同一配置跑两次，一次 12 条一次 0 条，
+    // 差别只来自服务商默认采样温度。评审工具不能这样。
+    const { url, bodies } = await scriptedServer([
+      { toolCalls: [{ name: 'finish', args: { findings: [] } }] },
+    ])
+    await runAgentLoop(baseOpts(url) as never)
+    const sent = JSON.parse(bodies()[0]!) as Record<string, unknown>
+    expect(sent.temperature).toBe(0)
+  }, 60_000)
+
+  it('轮次耗尽时追加一次只带 finish 的收尾请求，把已有发现带回', async () => {
+    // 前三轮都在跑代码（耗尽 maxRounds=3），第四轮是收尾请求。
+    const { url, bodies } = await scriptedServer([
+      { toolCalls: [{ name: 'run_code', args: { program: 'return 1' } }] },
+      { toolCalls: [{ name: 'run_code', args: { program: 'return 2' } }] },
+      { toolCalls: [{ name: 'run_code', args: { program: 'return 3' } }] },
+      { toolCalls: [{ name: 'finish', args: { findings: [{ path: 'a.ts', category: 'bug', severity: 'high', title: '抢救回来的问题' }] } }] },
+    ])
+    const r = await runAgentLoop(baseOpts(url, { maxRounds: 3, tools: ['read'] }) as never)
+
+    // 状态仍是 max-rounds（不能伪装成 finished），但发现不能丢
+    expect(r.stopReason).toBe('max-rounds')
+    expect(r.result.findings).toHaveLength(1)
+    expect(r.result.findings[0]!.title).toContain('抢救')
+
+    // 收尾请求只有 finish，不能再花预算跑代码
+    const last = JSON.parse(bodies()[bodies().length - 1]!) as { tools: Array<{ function: { name: string } }> }
+    expect(last.tools.map((x) => x.function.name)).toEqual(['finish'])
+  }, 60_000)
+
+  it('收尾请求也拿不到 finish 时，仍是 max-rounds 且给出明确告警', async () => {
+    const { url } = await scriptedServer([
+      { toolCalls: [{ name: 'run_code', args: { program: 'return 1' } }] },
+    ])
+    const r = await runAgentLoop(baseOpts(url, { maxRounds: 1, tools: ['read'] }) as never)
+    expect(r.stopReason).toBe('max-rounds')
+    expect(r.result.findings).toHaveLength(0)
+    expect(r.result.issues.join()).toContain('最大轮次')
+  }, 60_000)
+})
