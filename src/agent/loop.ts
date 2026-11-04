@@ -119,6 +119,25 @@ function parseArgs(call: ToolCall): unknown {
 /**
  * 运行一个 agent 的完整循环。
  */
+/**
+ * 把「预算里的输出上限」翻译成请求里的 max_tokens。
+ *
+ * 为什么需要这个转换（实机踩到的）：
+ *   配置里 budget.maxOutputTokens = 0 的语义是「不限」，但 OpenAI 兼容端点把
+ *   max_tokens 当成「必须是 > 0 的正数」。原样透传 0 会得到
+ *     400 Too small: expected number to be >0
+ *   于是整个评审在第一次请求就失败，报告却显示「已完成 0 个问题」——
+ *   用户完全看不出是被这个参数卡住的。
+ *
+ * 结论：**不限 = 不发送这个字段**，而不是发 0。
+ * @param budget 配置里的输出预算；<= 0 表示不限
+ * @returns 要发送的 max_tokens；不限时为 undefined（调用方据此省略字段）
+ */
+export function maxTokensFor(budget: number): number | undefined {
+  if (!Number.isFinite(budget) || budget <= 0) return undefined
+  return Math.floor(budget)
+}
+
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopResult> {
   const messages: ChatMessage[] = [
     { role: 'system', content: opts.system },
@@ -146,9 +165,17 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
     let callResult
     try {
+      // 不限（预算 0）时不发送 max_tokens：tsconfig 开了 exactOptionalPropertyTypes，
+      // 显式传 undefined 反而不合法，用条件展开表达「这个字段不存在」。
+      const maxTokens = maxTokensFor(opts.maxOutputTokens)
       callResult = await callChatCompletion(
         opts.llm,
-        { model: opts.model, messages, tools, max_tokens: opts.maxOutputTokens },
+        {
+          model: opts.model,
+          messages,
+          tools,
+          ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+        },
       )
     } catch (error) {
       return {
