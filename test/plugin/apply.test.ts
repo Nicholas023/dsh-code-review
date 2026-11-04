@@ -50,7 +50,8 @@ const ABS_REPO = process.platform === 'win32' ? 'D:/some/repo' : '/tmp/some/repo
 /** 模拟 Cordis 上下文，记录注册了什么。 */
 function makeCtx() {
   const tools: Array<{ name: string; execute?: (...args: unknown[]) => Promise<unknown> }> = []
-  const commands: Array<{ name: string }> = []
+  // 保留完整定义：斜杠命令的契约（input 形状、handler 返回值）必须能被断言
+  const commands: Array<Record<string, any>> = []
   const warnings: string[] = []
   // 宿主的 configEditor（假）：0.2.0 起配置由它写入，所以挂载测试必须提供它，
   // 否则 code_review_set_config 只能诚实地回「profile 不可写」。
@@ -74,7 +75,7 @@ function makeCtx() {
     },
     commands: {
       register: (cmd: unknown) => {
-        commands.push(cmd as { name: string })
+        commands.push(cmd as Record<string, any>)
         return () => { /* dispose */ }
       },
     },
@@ -199,6 +200,37 @@ describe('工具可调用', () => {
     const setCfg = tools.find((t) => t.name === SET_CONFIG_TOOL_NAME)!
     const out = (await setCfg.execute!({ patch: 'not-an-object' })) as { ok: boolean }
     expect(out.ok).toBe(false)
+    dispose()
+  })
+})
+
+describe('斜杠命令契约', () => {
+  it('定义带 definitionId 且 input 是 { hint }（不是字符串）', () => {
+    // 回归：曾经把 input 写成字符串 'repo_path [mode]'，宿主 normalizeDefinition 直接抛
+    // TypeError，被 try/catch 吞掉 —— 表现为「/review 死活不出现，日志里什么都没有」。
+    const { ctx, commands } = makeCtx()
+    const dispose = apply(ctx as never)
+    const cmd = commands.find((c) => c.name === 'review')!
+    expect(cmd.definitionId).toBe('dsh-code-review/review')
+    expect(typeof cmd.input).toBe('object')
+    expect(cmd.input).not.toBeNull()
+    expect(typeof cmd.input.hint).toBe('string')
+    expect(cmd.input.hint.trim().length).toBeGreaterThan(0)
+    dispose()
+  })
+
+  it('handler 返回 CommandResult（{ kind, text }），不是裸字符串', async () => {
+    // 回归：宿主 normalizeResult 要求 kind 字段，返回字符串同样会被判非法。
+    const { ctx, commands } = makeCtx()
+    const dispose = apply(ctx as never)
+    const cmd = commands.find((c) => c.name === 'review')!
+    const out = (await cmd.handler({ agent: { session: { id: 's1', header: { cwd: ABS_REPO } } } })) as {
+      kind?: string
+      text?: string
+    }
+    expect(typeof out).toBe('object')
+    expect(['success', 'error']).toContain(out.kind)
+    expect(typeof out.text).toBe('string')
     dispose()
   })
 })
