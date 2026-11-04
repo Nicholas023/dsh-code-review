@@ -88,3 +88,24 @@ export function estimateCost(usage: CostUsage, table: PriceTable | null | undefi
 export function formatCost(amount: number): string {
   return amount.toFixed(2)
 }
+
+/**
+ * 超支提示。
+ *
+ * 语义必须说清楚（这里踩过一次）：费用上限是在**发起下一次模型调用之前**检查的，
+ * 单次调用本身花多少，调用前无法预知。所以上限保证的是「不会继续花钱」，
+ * 不是「一分钱都不会超」。一旦本次总额已经超过上限，就必须显式说出来 ——
+ * 静默超支比没有上限更恶劣。
+ * @param cost    本次实际费用（null = 未配置单价）
+ * @param maxCost 上限（0 = 不限）
+ * @param currency 货币单位
+ * @returns 需要提示的文本；未超支或不计费时返回 null
+ */
+export function costOvershootNotice(cost: number | null, maxCost: number, currency: string): string | null {
+  if (cost === null || maxCost <= 0 || cost <= maxCost) return null
+  return (
+    '本次费用 ' + cost.toFixed(2) + ' ' + currency +
+    ' 已超过上限 ' + maxCost.toFixed(2) + ' ' + currency +
+    '：上限只在发起下一次模型调用前检查，单次调用的实际费用无法预知'
+  )
+}

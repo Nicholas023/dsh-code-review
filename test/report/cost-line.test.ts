@@ -13,7 +13,9 @@ import { renderMarkdown } from '../../src/report/markdown.js'
 import type { ReviewReport } from '../../src/report/schema.js'
 
 /** 造一份最小但完整的报告。 */
-function makeReport(cost: ReviewReport['usage']['cost']): ReviewReport {
+// 用 NonNullable：cost 是可选字段，直接取类型会带上 undefined，
+// 而 exactOptionalPropertyTypes 下「可选」与「显式 undefined」不是一回事。
+function makeReport(cost: Exclude<ReviewReport['usage']['cost'], undefined>): ReviewReport {
   return {
     schemaVersion: 1,
     generatedAt: '2026-11-04T00:00:00.000Z',

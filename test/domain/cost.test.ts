@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { estimateCost, formatCost, priceTableOf } from '../../src/domain/cost.js'
+import { costOvershootNotice, estimateCost, formatCost, priceTableOf } from '../../src/domain/cost.js'
 
 /** 一个填了单价的预算。 */
 const priced = {
@@ -70,5 +70,35 @@ describe('费用计算', () => {
 describe('展示', () => {
   it('金额保留两位小数', () => {
     expect(formatCost(0.5678)).toBe('0.57')
+  })
+})
+
+describe('超支提示', () => {
+  it('未配置单价时不提示', () => {
+    expect(costOvershootNotice(null, 1, 'CNY')).toBeNull()
+  })
+
+  it('上限为 0（不限）时不提示', () => {
+    expect(costOvershootNotice(9.99, 0, 'CNY')).toBeNull()
+  })
+
+  it('未超支时不提示', () => {
+    expect(costOvershootNotice(0.5, 1, 'CNY')).toBeNull()
+  })
+
+  it('恰好等于上限不算超支', () => {
+    expect(costOvershootNotice(1, 1, 'CNY')).toBeNull()
+  })
+
+  it('超支时点名金额、上限与原因', () => {
+    const msg = costOvershootNotice(0.0092, 0.000001, 'CNY')
+    expect(msg).not.toBeNull()
+    expect(msg).toContain('0.01')
+    expect(msg).toContain('超过上限')
+    expect(msg).toContain('CNY')
+  })
+
+  it('美元时显示 USD', () => {
+    expect(costOvershootNotice(2, 1, 'USD')).toContain('USD')
   })
 })

@@ -19,7 +19,7 @@
 
 import type { ConfigV2 } from '../config/defaults.js'
 import type { ReviewScope, SizeTier } from '../domain/review.js'
-import { priceTableOf } from '../domain/cost.js'
+import { costOvershootNotice, priceTableOf } from '../domain/cost.js'
 import { classifySize, evaluateDispatch, mainAgentPolicy, needsFurtherSplit, type SizingThresholds } from '../domain/review.js'
 import { collectReviewDiff, listScanFiles, synthesizeWholeFile } from '../git/diff.js'
 import type { FileDiff } from '../git/diff-parser.js'
@@ -323,6 +323,11 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
       sourceTask: reason,
     })))
   }
+
+  // 费用上限只在「下一次调用前」检查，因此单次调用可能已经超支。
+  // 超了就必须说出来 —— 静默超支比不设上限更糟。
+  const overshoot = costOvershootNotice(usage.cost, config.budget.maxCost, config.budget.currency)
+  if (overshoot !== null) warnings.push(overshoot)
 
   // ── 5.5 行号定位 ──
   // 只有这里同时握有「模型给的行号」和「真实 diff」，所以定位只能在这里做。

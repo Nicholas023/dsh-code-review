@@ -84,7 +84,7 @@ export const CONFIG_FIELDS: FieldDict = {
     dict: {
       maxInputTokens: editable('number', '单任务输入 token 上限。', { minimum: 0, maximum: 100000000 }),
       maxOutputTokens: editable('number', '单任务输出 token 上限。', { minimum: 0, maximum: 10000000 }),
-      maxCost: editable('number', '单任务费用上限（单位见「费用单位」）。0 表示不限；只有下面填了单价才会真正生效。', { minimum: 0, maximum: 100000 }),
+      maxCost: editable('number', '单任务费用上限（单位见「费用单位」）。0 表示不限；只有填了单价才生效。注意：上限在每次模型调用前检查，单次调用的费用无法预知，因此可能超出上限最多一次调用的开销（超支会在报告里点名）。', { minimum: 0, maximum: 100000 }),
       currency: editable('string', '费用单位。只影响显示与语义，不做汇率换算（按你要用的货币把单价换算好再填）。', { enum: ['CNY', 'USD'] }),
       inputPricePerMTok: editable('number', '输入 token 单价（每百万）。三项单价全为 0 = 不计费：不统计金额，也不因费用中断评审。', { minimum: 0, maximum: 1000000 }),
       outputPricePerMTok: editable('number', '输出 token 单价（每百万）。', { minimum: 0, maximum: 1000000 }),
