@@ -22,7 +22,7 @@ import {
   writeProgress,
   type ProgressSnapshot,
 } from '../../src/plugin/progress.js'
-import { buildProgressItems, isRunningStage } from '../../src/plugin/webapi.js'
+import { buildProgressItems, isRunningStage, readReportFor } from '../../src/plugin/webapi.js'
 
 const roots: string[] = []
 function tempRoot(): string {
@@ -145,5 +145,49 @@ describe('合并成界面数据', () => {
   it('limit 生效', () => {
     const many = Array.from({ length: 10 }, (_, i) => snap('t' + String(i)))
     expect(buildProgressItems(many, [], 3)).toHaveLength(3)
+  })
+})
+
+describe('读报告', () => {
+  /** 写一份最小可用的报告 JSON。 */
+  function writeReport(dir: string, findings: unknown[] = []): string {
+    const p = join(dir, 'report.json')
+    writeFileSync(p, JSON.stringify({ status: 'completed', findings }), 'utf8')
+    return p
+  }
+
+  it('按任务卡里的路径读出 findings', () => {
+    const dir = tempRoot()
+    const path = writeReport(dir, [{
+      id: 'f-1', severity: 'high', category: 'security', path: 'a.js', lineStart: 3,
+      title: '标题', explanation: '解释', recommendation: '建议', confidence: 0.8,
+    }])
+    const r = readReportFor('t1', [{ id: 't1', summary: { reportJsonPath: path, status: 'completed' } }])
+    expect(r).not.toBeNull()
+    expect(r!.findings).toHaveLength(1)
+    expect(r!.findings[0]!.severity).toBe('high')
+    expect(r!.findings[0]!.lineStart).toBe(3)
+  })
+
+  it('任务卡不存在时返回 null', () => {
+    expect(readReportFor('nope', [])).toBeNull()
+  })
+
+  it('路径不是 .json 时拒绝（不当作任意文件读取接口）', () => {
+    const dir = tempRoot()
+    const p = join(dir, 'note.txt')
+    writeFileSync(p, 'x', 'utf8')
+    expect(readReportFor('t1', [{ id: 't1', summary: { reportJsonPath: p } }])).toBeNull()
+  })
+
+  it('文件不存在时返回 null', () => {
+    expect(readReportFor('t1', [{ id: 't1', summary: { reportJsonPath: join(tempRoot(), 'x.json') } }])).toBeNull()
+  })
+
+  it('损坏的 JSON 返回 null 而不是抛错', () => {
+    const dir = tempRoot()
+    const p = join(dir, 'bad.json')
+    writeFileSync(p, '{ 坏', 'utf8')
+    expect(readReportFor('t1', [{ id: 't1', summary: { reportJsonPath: p } }])).toBeNull()
   })
 })
