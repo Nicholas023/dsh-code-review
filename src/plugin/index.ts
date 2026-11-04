@@ -390,15 +390,24 @@ export function apply(ctx: Ctx, rawConfig?: unknown): () => void {
         const commands = sctx.commands
         if (commands === undefined) return
         disposers.push(commands.register({
+          // 命令定义的身份：DSH 用它配对注册与卸载（运行时就是普通字符串）
+          definitionId: 'dsh-code-review/review',
           name: 'review',
           description: '发起一次代码评审（等于 code_review 工具）',
-          input: 'repo_path [mode] [focus]',
+          // 契约：input 若提供，必须是 { hint: string }。
+          // 传字符串会让 register 直接抛 TypeError，而异常会被下面的 try/catch 吞掉——
+          // 表现就是「斜杠命令死活不出现、日志里也没有任何东西」。实机踩过。
+          input: { hint: 'repo_path [mode] [focus]' },
           handler: async (invocation: { agent?: { session?: { id?: string; header?: { cwd?: string } } } }) => {
             const raw = invocation?.agent?.session
             const cwd = raw?.header?.cwd
             const sid = typeof raw?.id === 'string' ? raw.id : null
             const r = await doSubmit({ repo_path: cwd }, ctx, cwd, sid, config)
-            return r.text
+            // 契约：handler 必须返回 { kind: 'success' | 'error', text? }。
+            // 返回纯字符串会被判为非法结果，命令看起来「执行了但什么也没发生」。
+            return r.ok
+              ? { kind: 'success' as const, text: r.text }
+              : { kind: 'error' as const, text: r.text === '' ? '评审未提交' : r.text }
           },
         }))
       } catch (error) {
