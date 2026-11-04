@@ -59,6 +59,9 @@ export interface RunnerResult {
 const RUNNER_ENV_ALLOWLIST = [
   'PATH', 'Path', 'PATHEXT', 'COMSPEC', 'SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR',
   'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'LANG', 'LC_ALL', 'NODE_OPTIONS',
+  // Electron 以 Node 模式运行的开关：内核可能由 Harness.exe 启动，
+  // runner 也要沿用同一条规则（对真 node.exe 无害）
+  'ELECTRON_RUN_AS_NODE',
 ]
 
 /** 从父进程环境里挑出白名单变量（导出供测试验证隔离效果）。 */

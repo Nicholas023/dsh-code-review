@@ -12,6 +12,7 @@
 
 import { spawn } from 'node:child_process'
 import { isKernelAlive } from '../kernel/serve.js'
+import { nodeLaunchEnv } from './node-runtime.js'
 
 /** 拉起结果。 */
 export interface EnsureKernelResult {
@@ -45,6 +46,9 @@ export function ensureKernel(opts: {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
+        // 插件跑在 Electron 里：execPath 是 Harness.exe，
+        // 必须用这个开关让它以 Node 模式执行我们的内核脚本。
+        env: nodeLaunchEnv(),
       },
     )
     child.unref()
