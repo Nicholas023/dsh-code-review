@@ -55,7 +55,15 @@ npm install
 npm run build
 ```
 
-然后在 DSH 中启用插件（`package.json` 的 `main` 指向 `dist/plugin/index.js`）。
+然后把整个包目录放进 profile 的 `node_modules/` 下，重启 DSH，在「插件」页启用
+（`package.json` 的 `main` 指向 `dist/plugin/index.js`）。
+
+> **npm 上没有本包。** `dsh-code-review` 这个名字已被他人占用（v0.1.2），
+> 所以 `npm i dsh-code-review` / `pnpm add dsh-code-review` 装到的是别人的东西。
+> 请用 GitHub Release 的 tar.gz 或本地目录安装。
+
+> **从 0.1.x 升级？不支持。** 0.2.0 是重写版本（引擎、配置真源都换了），
+> 请卸载后重新安装并重填设置，详见 [UPGRADING.md](./UPGRADING.md)。
 
 ## 配置
 
@@ -80,8 +88,6 @@ npm run build
 **费用（可选）**：`budget.inputPricePerMTok` / `outputPricePerMTok` / `cacheReadPricePerMTok`
 三项单价 + `budget.currency`（CNY / USD）。**三项全 0 就完全不计费**——不统计金额、也不设限；
 填了任意一项才启用 `budget.maxCost`。上限只在每次模型调用前检查，单次调用可能超支（超了报告里会点名）。
-
-> 从 0.1.x 过来？**不支持原地升级**，请卸载后重装：见 [UPGRADING.md](UPGRADING.md)。
 
 > 面板的「保存」只提交**改动过的字段** —— 没动的字段不会被重写，避免覆盖别人刚存的值。
 
@@ -115,7 +121,7 @@ npm run build
 
 ```bash
 npm run typecheck   # 类型检查
-npm run test        # 331 个测试
+npm run test        # 491 个测试
 npm run build       # 构建到 dist/
 npm run bench       # token 基准（不联网）
 ```
