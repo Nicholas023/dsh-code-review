@@ -35,8 +35,10 @@ const SLOT_NAME = 'plugins.row.config'
  */
 export function apply(ctx: ClientContext): () => void {
   try {
+    // 不声明 locale：本插件没有注册自己的词条表，
+    // 声明一个不存在的命名空间只会给宿主多一个解析失败点。
     const dispose = ctx.slots.register(
-      { name: SLOT_NAME, key: 'dsh-code-review#dsh-code-review', locale: 'dshCodeReview' },
+      { name: SLOT_NAME, key: 'dsh-code-review#dsh-code-review' },
       (props: PluginConfigViewProps) => CodeReviewSettings(props),
     )
     return () => {
