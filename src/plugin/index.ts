@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url'
 import { normalizeConfig } from '../config/schema.js'
 import { writeCachedCredential } from '../store/credential-cache.js'
 import { configFilePath, legacyConfigFilePath, resolveDshRoot } from '../store/paths.js'
+import { parseReviewCommand } from './command-args.js'
 import { resolveCredentialFromHost } from './credentials.js'
 import { listTasks, readTask, requestCancellation } from '../store/task-store.js'
 import { settingsConfig, CONFIG_FIELDS, configObject } from '../settings/schema.js'
@@ -397,16 +398,27 @@ export function apply(ctx: Ctx, rawConfig?: unknown): () => void {
           // 契约：input 若提供，必须是 { hint: string }。
           // 传字符串会让 register 直接抛 TypeError，而异常会被下面的 try/catch 吞掉——
           // 表现就是「斜杠命令死活不出现、日志里也没有任何东西」。实机踩过。
-          input: { hint: 'repo_path [mode] [focus]' },
-          handler: async (invocation: { agent?: { session?: { id?: string; header?: { cwd?: string } } } }) => {
+          input: { hint: '[repo_path] [uncommitted|branch|commit|scan] [focus]（也可用 repo= base= head= commit= focus= 写法）' },
+          handler: async (invocation: {
+            readonly rawInput?: string
+            readonly agent?: { session?: { id?: string; header?: { cwd?: string } } }
+          }) => {
             const raw = invocation?.agent?.session
             const cwd = raw?.header?.cwd
             const sid = typeof raw?.id === 'string' ? raw.id : null
-            const r = await doSubmit({ repo_path: cwd }, ctx, cwd, sid, config)
+
+            // 解析用户在 /review 后面写的东西。
+            // 之前这里完全不看 rawInput，永远用会话 cwd —— 提示写着可传参数，实际不认。
+            const parsed = parseReviewCommand(
+              typeof invocation?.rawInput === 'string' ? invocation.rawInput : '',
+              { exists: (q) => existsSync(q) },
+            )
+            const noteText = parsed.notes.length > 0 ? '\n\n⚠ ' + parsed.notes.join('；') : ''
+            const r = await doSubmit(parsed.args, ctx, cwd, sid, config)
             // 契约：handler 必须返回 { kind: 'success' | 'error', text? }。
             // 返回纯字符串会被判为非法结果，命令看起来「执行了但什么也没发生」。
             return r.ok
-              ? { kind: 'success' as const, text: r.text }
+              ? { kind: 'success' as const, text: r.text + noteText }
               : { kind: 'error' as const, text: r.text === '' ? '评审未提交' : r.text }
           },
         }))
