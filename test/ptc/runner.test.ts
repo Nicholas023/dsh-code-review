@@ -12,11 +12,11 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { runCodeProgram } from '../../src/ptc/runner-client.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -32,6 +32,20 @@ function makeRepo(): string {
   writeFileSync(join(d, 'src', 'a.ts'), 'export const a = 1\n')
   return d
 }
+
+// 每个用例结束后删掉临时仓库：不清理会让 Temp 里堆积大量 dcr-runner-* 目录
+afterEach(() => {
+  while (dirs.length > 0) {
+    const d = dirs.pop()
+    if (d) {
+      try {
+        rmSync(d, { recursive: true, force: true })
+      } catch {
+        // Windows 上 git/杀软可能短暂占用，清理失败不影响测试结论
+      }
+    }
+  }
+})
 
 beforeAll(() => {
   // 构建 runner 产物（一次即可；失败会让 ENTRY 不存在，测试直接暴露而不是假绿）
