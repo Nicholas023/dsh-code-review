@@ -75,7 +75,18 @@ export interface SlotsService {
    * @returns 卸载函数
    */
   register(
-    options: { readonly name: string; readonly key?: string; readonly locale?: string },
+    options: {
+      readonly name: string
+      /** keyed slot 用：本条目占的键（main 面板靠它和侧栏 id 对应）。 */
+      readonly key?: string
+      /** list slot 用：条目 id。 */
+      readonly id?: string
+      /** list slot 用：排序权重。 */
+      readonly order?: number
+      /** list slot 用：显示名。 */
+      readonly label?: string
+      readonly locale?: string
+    },
     component: (props: PluginConfigViewProps) => unknown,
   ): () => void
   /**

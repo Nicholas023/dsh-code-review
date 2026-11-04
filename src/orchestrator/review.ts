@@ -43,7 +43,16 @@ export interface ReviewInput {
   /** runner 配置。 */
   readonly runner: RunnerOptions
   /** 进度回调。 */
-  readonly onProgress?: (event: { stage: string; detail?: string }) => void
+  /**
+   * 进度回调。
+   * detail 是给人看的说明；round/maxRounds 让界面能画「第 5/8 轮」。
+   */
+  readonly onProgress?: (event: {
+    readonly stage: string
+    readonly detail?: string
+    readonly round?: number
+    readonly maxRounds?: number
+  }) => void
 }
 
 /** 编排结果。 */
@@ -217,7 +226,17 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
     prices,
     runner: input.runner,
     tools: policy.sdk ? ['read', 'glob', 'grep'] : [],
-    ...(input.onProgress ? { onProgress: (e) => input.onProgress?.({ stage: 'main-agent', detail: 'round ' + String(e.round) }) } : {}),
+    ...(input.onProgress
+      ? {
+          onProgress: (e: { round: number }) =>
+            input.onProgress?.({
+              stage: 'main-agent',
+              detail: 'round ' + String(e.round),
+              round: e.round,
+              maxRounds: config.budget.maxAgentRounds,
+            }),
+        }
+      : {}),
   })
   agentStops.push({ agent: 'main', stopReason: main.stopReason, rounds: main.rounds })
   usage.inputTokens += main.usage.inputTokens

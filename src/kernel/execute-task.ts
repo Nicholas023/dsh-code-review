@@ -25,6 +25,7 @@ import { renderMarkdown } from '../report/markdown.js'
 import { redact } from '../report/redact.js'
 import type { ReviewReport } from '../report/schema.js'
 import { writeReport } from '../report/writer.js'
+import { writeProgress } from '../plugin/progress.js'
 
 /** 执行所需的宿主能力（便于测试注入）。 */
 export interface ExecuteDeps {
@@ -36,8 +37,25 @@ export interface ExecuteDeps {
   readonly runnerEntry: string
   /** 当前时间（ISO-8601）。 */
   readonly now: () => string
-  /** 进度回调。 */
-  readonly onProgress?: (detail: string) => void
+  /**
+   * 数据根目录。
+   *
+   * 传了才写进度文件；不传就完全不写。
+   * 为什么这样设计：进度是"给人看的附加物"，而单测会直接调 executeTask。
+   * 一旦默认落到 resolveDshRoot()，测试就会往用户真实的 ~/.dsh 里写假任务
+   * （实机踩过：面板里冒出 dcr-e2e-repo / scan-1 这类永远停在"写报告"的条目）。
+   */
+  readonly dshRoot?: string
+  /**
+   * 进度回调。
+   * detail 给人看；round/maxRounds 让界面能画「第 5/8 轮」。
+   */
+  readonly onProgress?: (event: {
+    readonly stage: string
+    readonly detail?: string
+    readonly round?: number
+    readonly maxRounds?: number
+  }) => void
 }
 
 /** 执行结果。 */
@@ -147,7 +165,37 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     memoryMb: config.execution.runnerMemoryMb,
   }
 
-  deps.onProgress?.('reviewing')
+  // ── 进度上报 ──
+  // 内核的 stdout 在拉起时是 'ignore'（见 plugin/process.ts），全部丢弃。
+  // 所以进度只能落文件：<pluginRoot>/progress/<taskId>.json，由宿主的 HTTP 路由读给浏览器。
+  const progressStartedAt = deps.now()
+  const emitProgress = (event: {
+    stage: string
+    detail?: string
+    round?: number
+    maxRounds?: number
+  }): void => {
+    if (deps.dshRoot === undefined) {
+      // 没给根目录 = 不写进度（测试路径）
+      deps.onProgress?.(event)
+      return
+    }
+    writeProgress({
+      taskId: record.id,
+      repoPath: record.scope.repoPath,
+      command: record.scope.command,
+      mode: record.scope.mode,
+      stage: event.stage,
+      detail: event.detail ?? null,
+      round: event.round ?? null,
+      maxRounds: event.maxRounds ?? null,
+      startedAt: progressStartedAt,
+      updatedAt: deps.now(),
+    }, deps.dshRoot)
+    deps.onProgress?.(event)
+  }
+
+  emitProgress({ stage: 'reviewing' })
   let out
   try {
     out = await runReview({
@@ -164,10 +212,11 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
       config,
       llm,
       runner,
-      ...(deps.onProgress ? { onProgress: (e) => deps.onProgress?.(e.stage) } : {}),
+      onProgress: (e) => emitProgress(e),
     })
   } catch (error) {
     const ke = error instanceof KernelError ? error : new KernelError('INTERNAL_UNEXPECTED', error instanceof Error ? error.message : String(error))
+    emitProgress({ stage: 'failed', detail: ke.message })
     return {
       ok: false,
       summary: null,
@@ -179,7 +228,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
   const elapsedSec = (Date.now() - startedAt) / 1000
 
   // 收敛 finding：行号定位 + 指纹
-  deps.onProgress?.('aggregating')
+  emitProgress({ stage: 'aggregating' })
   const findings: Finding[] = out.findings.map((raw, i) => {
     return {
       id: 'f-' + String(i + 1),
@@ -271,7 +320,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     // 它们是用于核对的标识，脱敏反而破坏可追溯性。
   }
 
-  deps.onProgress?.('reporting')
+  emitProgress({ stage: 'reporting' })
   const written = writeReport({
     directory: config.report.directory,
     repoName: repoNameOf(record.scope.repoPath),
@@ -282,6 +331,10 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
 
   const severityCounts: Record<string, number> = {}
   for (const f of deduped) severityCounts[f.severity] = (severityCounts[f.severity] ?? 0) + 1
+
+  // 终态也要落一条：否则进度文件会永远停在 "reporting"，
+  // 界面上一条已经跑完的任务会一直显示成"在跑"（实机踩过）。
+  emitProgress({ stage: out.status === 'failed' ? 'failed' : 'completed', detail: out.status })
 
   return {
     ok: out.status !== 'failed',

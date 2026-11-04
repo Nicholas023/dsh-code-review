@@ -22,6 +22,7 @@
  * 排查「面板没出现」时，先在开发者工具控制台确认这几行走没走。
  */
 
+import { CodeReviewPanel } from './panel.js'
 import { CodeReviewSettings } from './page.js'
 import type { ClientContext, PluginConfigViewProps } from './types.js'
 
@@ -42,6 +43,13 @@ export const SLOT_NAME = 'plugins.row.config'
  * 两个名字都必须是 dsh-code-review：前者是包名，后者是 cordis.patch.yml 里的行 id。
  */
 export const SLOT_KEY = 'dsh-code-review#dsh-code-review'
+
+/** 左侧栏「全局面板」列表 slot（宿主 dsh-client-ui-sidebar 声明）。 */
+const SIDEBAR_SLOT = 'sidebar.panellist'
+/** 主区内容 slot（宿主按 activePanelId 选 key）。 */
+const MAIN_SLOT = 'main'
+/** 面板 id：侧栏条目与主区 key 必须一致。 */
+export const PANEL_ID = 'dsh-code-review'
 
 /** 空卸载函数（失败路径统一返回它，别让调用方处理 undefined）。 */
 function noop(): void {
@@ -65,6 +73,27 @@ export function apply(ctx: ClientContext): () => void {
   }
 
   try {
+    // ── 侧栏入口 ──
+    // 宿主 sidebar 读 'sidebar.panellist' 的 { id, order, label } 生成左侧栏行；
+    // 点击时调用 layout.selectPanel(id)，主区再按这个 id 渲染 'main' 槽。
+    // 两处 id 必须一致，否则点进去是空白。
+    ctx.slots.inject(SIDEBAR_SLOT, () => {
+      const drop = ctx.slots.register(
+        { name: SIDEBAR_SLOT, id: PANEL_ID, order: 60, label: '代码审查' },
+        () => null,
+      )
+      return drop
+    })
+
+    // ── 主区面板 ──
+    ctx.slots.inject(MAIN_SLOT, () => {
+      const drop = ctx.slots.register(
+        { name: MAIN_SLOT, key: PANEL_ID },
+        () => CodeReviewPanel(),
+      )
+      return drop
+    })
+
     // 等宿主把 plugins.row.config 声明出来（打开插件页时）再注册。
     // 不声明 locale：本插件没有自己的词条表，声明一个不存在的命名空间只会多一个失败点。
     const dispose = ctx.slots.inject(SLOT_NAME, () => {
