@@ -152,6 +152,16 @@ export interface TaskSummary {
   readonly usage: Readonly<Record<string, number>> | null
   /** 实际耗时（秒）。 */
   readonly elapsedSec: number
+  /**
+   * 评审的整体状态：completed / partial / failed。
+   *
+   * 为什么必须落到摘要里：任务阶段是 completed（进程跑完了），但评审本身可能
+   * 是 partial（达到轮次上限、主 agent 报错）。两者混为一谈时，界面上会出现
+   * 「✅ 已完成 · 0 个问题」——一个没跑完的评审伪装成干净结论。实机踩过。
+   */
+  readonly status?: string
+  /** 运行告警（未跑完、预算耗尽、子任务未执行等）。 */
+  readonly warnings?: readonly string[]
 }
 
 /**

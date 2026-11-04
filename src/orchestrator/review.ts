@@ -237,6 +237,17 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
     dispatchTargets.set('主 agent 要求深挖：' + req.question, [...new Set([...existing, ...req.files])])
   }
 
+  // 只有当主 agent「没拿到正文」时，派子 agent 才有意义（它需要按需 read）。
+  // 小档的策略是把全部正文直接塞进提示，此时主 agent 已经看全了，
+  // 再派子任务就是让它们重复读同样的文件、各自再撞一次轮次上限。
+  // 实机数据：一个 2 文件 / 17k tokens 的小仓库派了 5 个子 agent，全部 max-rounds，
+  // 白烧掉大部分 token 却一个问题没多报。
+  const allowChildren = policy.sdk
+  if (!allowChildren && dispatchTargets.size > 0) {
+    warnings.push('主 agent 已获得全部正文（小档），跳过 ' + String(dispatchTargets.size) + ' 个子任务派发')
+    dispatchTargets.clear()
+  }
+
   // 子 agent 数量上限
   const maxChildren = Math.min(config.budget.maxChildren, dispatchTargets.size)
   let childIndex = 0

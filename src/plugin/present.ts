@@ -33,8 +33,16 @@ const STAGE_ICON: Record<string, string> = {
 
 /** 渲染单个任务卡。 */
 export function presentTask(record: TaskRecord): string {
-  const icon = STAGE_ICON[record.stage] ?? '🕐'
-  const label = STAGE_LABEL[record.stage] ?? record.stage
+  // 评审状态 vs 任务阶段是两回事：
+  //   stage=completed 只说明内核跑完了这一轮，
+  //   summary.status=partial 才说明「评审没拿到完整结论」。
+  // 二者混同会让失败伪装成「✅ 已完成 · 0 个问题」，所以这里优先看评审状态。
+  const reviewStatus = record.summary?.status
+  const partial = reviewStatus !== undefined && reviewStatus !== 'completed'
+  const icon = partial ? '⚠️' : (STAGE_ICON[record.stage] ?? '🕐')
+  const label = partial
+    ? (STAGE_LABEL[record.stage] ?? record.stage) + '（评审未完整完成）'
+    : (STAGE_LABEL[record.stage] ?? record.stage)
   const lines: string[] = []
 
   lines.push(icon + ' 任务 ' + record.id + ' — ' + label)
@@ -49,9 +57,18 @@ export function presentTask(record: TaskRecord): string {
   if (record.summary !== null) {
     const s = record.summary
     lines.push('')
+    if (partial) {
+      lines.push('**状态**：' + String(reviewStatus) + ' —— 本次评审**没有完整跑完**，下面的问题数不代表全部，也不是「没有问题」')
+      lines.push('')
+    }
     lines.push('**结果**：' + String(s.findingCount) + ' 个问题，覆盖 ' + String(s.coverage?.reviewed ?? 0) + '/' + String(s.coverage?.total ?? 0) + ' 个文件，耗时 ' + s.elapsedSec.toFixed(1) + ' 秒')
     if (s.usage !== null) {
       lines.push('**用量**：输入 ' + String(s.usage.inputTokens ?? 0) + ' / 输出 ' + String(s.usage.outputTokens ?? 0) + ' / 缓存命中 ' + String(s.usage.cacheReadTokens ?? 0) + ' tokens，' + String(s.usage.requests ?? 0) + ' 次请求')
+    }
+    const warns = s.warnings ?? []
+    if (warns.length > 0) {
+      lines.push('**告警**：')
+      for (const w of warns) lines.push('- ' + w)
     }
     if (s.reportPath !== null) lines.push('**报告**：' + s.reportPath)
     if (s.reportJsonPath !== null) lines.push('**机器可读**：' + s.reportJsonPath)

@@ -296,6 +296,10 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
         agents: out.usage.agents,
       },
       elapsedSec,
+      // 进程完成 ≠ 评审完成。把真实状态与告警一并带出去，
+      // 否则上层只能看到「completed + 0 个问题」。
+      status: out.status,
+      warnings: out.warnings,
     },
     reportPath: written.markdownPath,
     reportJsonPath: written.jsonPath,

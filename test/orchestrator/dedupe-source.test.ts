@@ -124,7 +124,11 @@ describe('去重与来源', () => {
       review: { ...DEFAULT_CONFIG.review, endpoint: url, model: 'test-model', credentialRef: 'K' },
       report: { ...DEFAULT_CONFIG.report, directory: reportDir },
       // 只允许一个子 agent，让链路确定
-      budget: { ...DEFAULT_CONFIG.budget, maxChildren: 1 },
+      // 这个用例必须让子 agent 真的跑起来，才能验证「主/子 agent 报同一问题时合并」。
+    // 小档（主 agent 已拿到全部正文）现在刻意不派子 agent，所以把阈值压到中档，
+    // 让同一个仓库走 medium 这条「可派子任务」的路径。其余变量保持不变。
+    sizing: { ...DEFAULT_CONFIG.sizing, smallTokens: 1, largeTokens: 10_000_000 },
+    budget: { ...DEFAULT_CONFIG.budget, maxChildren: 1 },
     }
     const submitted = submitReview(
       { repo_path: repo },
