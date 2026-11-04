@@ -27,5 +27,5 @@ bin/codecheck(.exe)）是 open-code-review 的 fork 改造：
   上游完整许可文本见 engine/LICENSE；引擎内嵌图标的上游归属声明见
   engine/internal/viewer/static/icons/NOTICE，均按原样保留。
 
-本仓库自身代码（src/、scripts/、client.js、std-facet.js 等）同样以
+本仓库自身代码（src/、scripts/、dist/ 等）同样以
 Apache License 2.0 发布，完整文本见根目录 LICENSE。

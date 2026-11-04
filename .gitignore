@@ -52,6 +52,10 @@ credentials.txt
 # ---------- Node / DSH 插件 ----------
 node_modules/
 dist/
+# 发布产物（scripts/release.mjs 生成）
+release/
+# npm pack 产物
+*.tgz
 build/
 *.log
 npm-debug.log*
@@ -104,3 +108,6 @@ Desktop.ini
 # 引擎二进制产物（构建可复现，从 GitHub Releases 分发，不入库）
 bin/
 
+
+# gh CLI 在仓库内留下的本地状态（不应提交）
+.local/

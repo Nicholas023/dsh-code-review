@@ -2,6 +2,33 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-11-04
+
+**重写版本：自研 Node/TypeScript 审查内核替换 Go/OCR 引擎。**
+
+### Changed（架构）
+
+- **内核自研且进程外**：不再 spawn `codecheck.exe`，改为独立 Node 进程。DSH 会话关闭、插件重载都不影响正在跑的评审；任务卡是唯一共享状态。
+- **PTC 执行模式**：模型不逐个调用工具，而是写一段程序在沙箱里执行，工具结果不进上下文。对比多轮工具调用，上下文开销显著下降（本地基准见 `npm run bench`）。
+- **主/子 agent 分层**：主 agent 看全局找跨文件问题，子 agent 深挖超阈值单元；派发 = 确定性规则打底 + 主 agent 追加。
+- **只读 SDK + 子进程沙箱**：内核只有 read/glob/grep；模型代码在独立子进程运行，硬超时 + 内存上限，路径围栏拒绝逃逸。
+- **双报告**：Markdown（人读）+ JSON（机器读），原子写入，同一 run 共用 basename。
+- **配置 v2**：分区结构（review/execution/budget/report/sizing），带版本号与迁移链；**写入保留未知字段**，修掉 0.1.x「未知键剔除」的丢配置缺陷。
+- **设置描述层**：字段描述（`meta.volatile` + Standard Schema）与页面结构（路径寻址 + 门控）分离，供宿主渲染。
+
+### Removed
+
+- `engine/`（Go，477 文件）与 `bin/codecheck.exe` 整体退役；源码归档于 `archive/0.1.3-go-engine` 标签。
+- 旧插件外壳 `src/*.js`（17 个文件）、`client.js`、`std-facet.js`。
+- `engine_bin` 配置字段（0.2.0 无外部引擎）；`concurrency` 语义改为「同时运行的评审任务数」。
+- 运行时依赖 `@deepseek-ai/schemastery`、`js-yaml`。
+
+### Known gaps（0.2.0 首发未覆盖）
+
+- 设置面板目前只有**数据层**（字段描述 + 页面结构 + 门控），客户端 slots 组件尚未接入。
+- 任务取消在领域层有状态字段，但没有工具入口暴露给用户。
+- 真实端点的 token 基准需要人工配置 `BENCH_*` 环境变量后运行。
+
 ## [0.1.3] - 2026-10-21
 
 ### Fixed（issue #9–#24 汇集，含 4 路方案整合 #29）
