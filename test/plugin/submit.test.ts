@@ -43,6 +43,16 @@ function deps(root: string, cwdHint?: string) {
   }
 }
 
+/**
+ * 跨平台的绝对路径。
+ *
+ * 为什么不能直接写 'D:/repo'：Linux 上 path.isAbsolute('D:/repo') 是 false，
+ * 提交会以 INPUT_REPO_PATH_NOT_ABSOLUTE 被拒，测试在 ubuntu-latest 上整片变红
+ * （2026-11-04 首次跑 CI 时暴露）。被测代码本身是正确的 —— 错的是测试输入。
+ */
+const ABS_REPO = process.platform === 'win32' ? 'D:/repo' : '/tmp/repo'
+const ABS_SHORT = process.platform === 'win32' ? 'D:/r' : '/tmp/r'
+
 describe('repo_path 校验', () => {
   it('缺 repo_path 且无 cwd 时拒绝', () => {
     const r = submitReview({}, deps(tempRoot()))
@@ -60,40 +70,40 @@ describe('repo_path 校验', () => {
 
   it('省略 repo_path 时用调用方 cwd 兜底', () => {
     const root = tempRoot()
-    const r = submitReview({}, deps(root, 'D:/repo'))
+    const r = submitReview({}, deps(root, ABS_REPO))
     expect(r.ok).toBe(true)
   })
 })
 
 describe('模式与参数互斥', () => {
   it('未知 mode 被拒绝', () => {
-    const r = submitReview({ repo_path: 'D:/r', mode: 'magic' }, deps(tempRoot()))
+    const r = submitReview({ repo_path: ABS_SHORT, mode: 'magic' }, deps(tempRoot()))
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error.code).toBe('INPUT_INVALID_ARGUMENT')
   })
 
   it('commit 模式缺 SHA 时 fail-closed（绝不退化成 workspace）', () => {
-    const r = submitReview({ repo_path: 'D:/r', mode: 'commit' }, deps(tempRoot()))
+    const r = submitReview({ repo_path: ABS_SHORT, mode: 'commit' }, deps(tempRoot()))
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error.code).toBe('INPUT_MISSING_COMMIT_SHA')
   })
 
   it('空白 SHA 也被拒绝', () => {
-    const r = submitReview({ repo_path: 'D:/r', mode: 'commit', commit: '   ' }, deps(tempRoot()))
+    const r = submitReview({ repo_path: ABS_SHORT, mode: 'commit', commit: '   ' }, deps(tempRoot()))
     expect(r.ok).toBe(false)
   })
 
   it('非 commit 模式带 commit 参数被拒绝', () => {
-    const r = submitReview({ repo_path: 'D:/r', mode: 'uncommitted', commit: 'abc123' }, deps(tempRoot()))
+    const r = submitReview({ repo_path: ABS_SHORT, mode: 'uncommitted', commit: 'abc123' }, deps(tempRoot()))
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error.code).toBe('INPUT_MODE_CONFLICT')
   })
 
   it('scan 模式带 base_ref 被拒绝', () => {
-    const r = submitReview({ repo_path: 'D:/r', mode: 'scan', base_ref: 'main' }, deps(tempRoot()))
+    const r = submitReview({ repo_path: ABS_SHORT, mode: 'scan', base_ref: 'main' }, deps(tempRoot()))
     expect(r.ok).toBe(false)
   })
 })
@@ -101,19 +111,19 @@ describe('模式与参数互斥', () => {
 describe('正常提交', () => {
   it('创建 queued 任务卡并返回 id', () => {
     const root = tempRoot()
-    const r = submitReview({ repo_path: 'D:/repo' }, deps(root))
+    const r = submitReview({ repo_path: ABS_REPO }, deps(root))
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.taskId).toBe('task-1')
     const tasks = listTasks(root)
     expect(tasks).toHaveLength(1)
     expect(tasks[0]!.stage).toBe('queued')
-    expect(tasks[0]!.scope.repoPath).toBe('D:/repo')
+    expect(tasks[0]!.scope.repoPath).toBe(ABS_REPO)
   })
 
   it('commit 模式把 SHA 写进 scope', () => {
     const root = tempRoot()
-    const r = submitReview({ repo_path: 'D:/repo', mode: 'commit', commit: 'abc123' }, deps(root))
+    const r = submitReview({ repo_path: ABS_REPO, mode: 'commit', commit: 'abc123' }, deps(root))
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.scope.commit).toBe('abc123')
@@ -122,7 +132,7 @@ describe('正常提交', () => {
 
   it('scan 模式 command 为 scan 且 mode 为 null', () => {
     const root = tempRoot()
-    const r = submitReview({ repo_path: 'D:/repo', mode: 'scan' }, deps(root))
+    const r = submitReview({ repo_path: ABS_REPO, mode: 'scan' }, deps(root))
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.scope.command).toBe('scan')
@@ -131,7 +141,7 @@ describe('正常提交', () => {
 
   it('配置被快照进任务卡（之后改设置不影响本次）', () => {
     const root = tempRoot()
-    const r = submitReview({ repo_path: 'D:/repo' }, deps(root))
+    const r = submitReview({ repo_path: ABS_REPO }, deps(root))
     expect(r.ok).toBe(true)
     if (!r.ok) return
     const task = listTasks(root)[0]!
@@ -141,7 +151,7 @@ describe('正常提交', () => {
   it('数组参数被清洗（过滤非字符串与空串）', () => {
     const root = tempRoot()
     const r = submitReview(
-      { repo_path: 'D:/r', exclude_paths: ['engine/**', '', 123, ' dist/** '] },
+      { repo_path: ABS_SHORT, exclude_paths: ['engine/**', '', 123, ' dist/** '] },
       deps(root),
     )
     expect(r.ok).toBe(true)
@@ -166,7 +176,7 @@ describe('状态呈现', () => {
     failure: null,
     requestor: null,
     scope: {
-      repoPath: 'D:/repo',
+      repoPath: ABS_REPO,
       command: 'review' as const,
       mode: 'uncommitted' as const,
       baseRef: null,
@@ -186,7 +196,7 @@ describe('状态呈现', () => {
 
   it('单任务呈现包含仓库与状态', () => {
     const text = presentTask(base)
-    expect(text).toContain('D:/repo')
+    expect(text).toContain(ABS_REPO)
     expect(text).toContain('排队中')
   })
 
