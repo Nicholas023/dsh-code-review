@@ -38,6 +38,15 @@ afterEach(() => {
   }
 })
 
+/**
+ * 跨平台绝对路径。
+ *
+ * 'D:/some/repo' 在 Linux 上不是绝对路径（path.isAbsolute 为 false），
+ * 提交会被 INPUT_REPO_PATH_NOT_ABSOLUTE 拒绝 —— 2026-11-04 首次跑 CI 时在
+ * ubuntu-latest 上暴露。被测代码是对的，错的是测试输入。
+ */
+const ABS_REPO = process.platform === 'win32' ? 'D:/some/repo' : '/tmp/some/repo'
+
 /** 模拟 Cordis 上下文，记录注册了什么。 */
 function makeCtx() {
   const tools: Array<{ name: string; execute?: (...args: unknown[]) => Promise<unknown> }> = []
@@ -132,7 +141,7 @@ describe('工具可调用', () => {
     const { ctx, tools } = makeCtx()
     const dispose = apply(ctx as never)
     const review = tools.find((t) => t.name === TOOL_NAME)!
-    const out = (await review.execute!({ repo_path: 'D:/some/repo' }, {})) as { ok: boolean; task_id?: string }
+    const out = (await review.execute!({ repo_path: ABS_REPO }, {})) as { ok: boolean; task_id?: string }
     expect(out.ok).toBe(true)
     expect(typeof out.task_id).toBe('string')
     dispose()
@@ -153,7 +162,7 @@ describe('工具可调用', () => {
     const dispose = apply(ctx as never)
     const review = tools.find((t) => t.name === TOOL_NAME)!
     const status = tools.find((t) => t.name === STATUS_TOOL_NAME)!
-    const submitted = (await review.execute!({ repo_path: 'D:/some/repo' }, {})) as { task_id: string }
+    const submitted = (await review.execute!({ repo_path: ABS_REPO }, {})) as { task_id: string }
     const listed = (await status.execute!({})) as { text: string }
     expect(listed.text).toContain(submitted.task_id)
     dispose()
