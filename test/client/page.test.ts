@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { deriveControls, draftToPatch, snapshotToDraft } from '../../src/client/logic.js'
+import { deriveControls, draftToOps, draftToPatch, snapshotToDraft } from '../../src/client/logic.js'
 
 describe('控件派生', () => {
   it('派生出的控件都带路径、标签与说明', () => {
@@ -102,5 +102,38 @@ describe('草稿 diff', () => {
   it('新增字段（基线里没有）也算变化', () => {
     const patch = draftToPatch({ 'review.endpoint': 'https://new' }, {})
     expect(patch.review).toEqual({ endpoint: 'https://new' })
+  })
+})
+
+describe('提交给宿主的 op 数组', () => {
+  it('变过的字段生成 set op，path 是分段数组', () => {
+    const baseline = { review: { model: 'a', endpoint: 'https://keep' } }
+    const draft = { 'review.model': 'b', 'review.endpoint': 'https://keep' }
+    expect(draftToOps(draft, baseline)).toEqual([
+      { op: 'set', path: ['review', 'model'], value: 'b' },
+    ])
+  })
+
+  it('没变时为空数组（不会把没动的字段也写一遍）', () => {
+    expect(draftToOps({ 'review.model': 'a' }, { review: { model: 'a' } })).toEqual([])
+  })
+
+  it('基线里没有的字段也算变化', () => {
+    expect(draftToOps({ 'review.endpoint': 'https://new' }, {})).toEqual([
+      { op: 'set', path: ['review', 'endpoint'], value: 'https://new' },
+    ])
+  })
+
+  it('多个分区一次提交', () => {
+    const ops = draftToOps(
+      { 'review.model': 'b', 'budget.maxChildren': 3 },
+      { review: { model: 'a' }, budget: { maxChildren: 8 } },
+    )
+    expect(ops).toHaveLength(2)
+    expect(ops.map((o) => o.path.join('.'))).toEqual(['review.model', 'budget.maxChildren'])
+  })
+
+  it('没有点号的脏路径被跳过（不让宿主收到非法 path）', () => {
+    expect(draftToOps({ review: 'oops' }, {})).toEqual([])
   })
 })

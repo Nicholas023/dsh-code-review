@@ -17,6 +17,7 @@
  */
 
 import { CONFIG_FIELDS } from '../settings/fields.js'
+import type { SettingsPathOp } from './types.js'
 
 /** 一个可编辑控件的描述（从 schema 派生）。 */
 export interface Control {
@@ -118,6 +119,29 @@ export function draftToPatch(
     patch[section] = { ...(patch[section] ?? {}), [path.slice(dot + 1)]: value }
   }
   return patch
+}
+
+/**
+ * 把草稿 diff 成宿主的 op 数组（这是面板真正提交给宿主的东西）。
+ *
+ * 与 draftToPatch 的区别：那个产出的是给人看的 {section:{key:value}}，
+ * 这个产出的是宿主 applyPathOp 认识的 {op,path,value}，且 path 必须是**分段数组**。
+ * 只提交真正变过的字段 —— 否则会把用户没动过的字段也覆写一遍。
+ * @param draft    当前草稿（扁平路径 → 值）
+ * @param baseline 基线（宿主上一次给的值）
+ */
+export function draftToOps(
+  draft: Readonly<Record<string, unknown>>,
+  baseline: Record<string, unknown> | undefined,
+): SettingsPathOp[] {
+  const ops: SettingsPathOp[] = []
+  for (const [path, value] of Object.entries(draft)) {
+    if (valueAt(baseline, path) === value) continue
+    const dot = path.indexOf('.')
+    if (dot <= 0) continue
+    ops.push({ op: 'set', path: [path.slice(0, dot), path.slice(dot + 1)], value })
+  }
+  return ops
 }
 
 /** 把宿主值拉平成草稿。 */

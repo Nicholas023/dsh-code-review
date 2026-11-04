@@ -6,6 +6,11 @@
  *
  * 这里只负责把 logic.ts 算出来的东西画出来：控件、草稿态、保存按钮。
  * 判断逻辑一律在 logic.ts —— 那样它能在没有 DOM 的环境里被测试。
+ *
+ * 与宿主交互的两条铁律（都在实机上踩过）：
+ *  1. form 只有 state + mutate，没有 set/unset —— 保存必须走 mutate(ops)。
+ *  2. 宿主的三态必须分开渲染：loading / ready / unavailable。
+ *     不区分就会出现「面板空白一片，用户不知道是坏了还是在加载」。
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -13,7 +18,7 @@ import {
   SECTION_LABELS,
   SECTION_ORDER,
   deriveControls,
-  draftToPatch,
+  draftToOps,
   snapshotToDraft,
   valueAt,
   type Control,
@@ -56,67 +61,73 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
 
   const state = form?.state
   const revision = state?.revision
+  const value = state?.value
   const status = state?.status
 
   useEffect(() => {
     if (dirty) return
-    const next = snapshotToDraft(state?.value, controls)
-    setDraft(next)
-    setBaseline(state?.value)
-  }, [revision, status, dirty, controls, state?.value])
+    setDraft(snapshotToDraft(value, controls))
+    setBaseline(value)
+  }, [revision, status, dirty, controls, value])
 
-  // ── 摘要视图 ──
+  // ── 摘要视图（插件列表里那一行的小字）──
   if (props.view === 'summary') {
-    const endpoint = valueAt(state?.value, 'review.endpoint')
-    const model = valueAt(state?.value, 'review.model')
+    const endpoint = valueAt(value, 'review.endpoint')
+    const model = valueAt(value, 'review.model')
     if (typeof endpoint !== 'string' || endpoint === '') return <span>未配置端点</span>
     return <span>{String(model ?? '?')} @ {endpoint}</span>
   }
 
-  // ── 不可用状态 ──
-  if (form === undefined || status === 'unavailable') {
-    return <p style={hintStyle}>配置不可用：宿主没有向本客户端暴露该设置命名空间。</p>
+  // ── 不可用：宿主没把命名空间给到客户端 ──
+  if (form === undefined) {
+    return (
+      <p style={hintStyle}>
+        配置不可用：宿主没有向本客户端提供配置表单。
+        通常意味着插件没有导出 Config，或当前 profile 不可写。
+      </p>
+    )
   }
-  if (status === 'loading') {
+  if (status === 'unavailable') {
+    return (
+      <p style={hintStyle}>
+        配置不可用：宿主报告该设置命名空间不存在。
+        请确认插件已启用、且 DSH 版本满足要求，然后重新打开本页。
+      </p>
+    )
+  }
+  if (status !== 'ready' || value === undefined) {
     return <p style={hintStyle}>正在读取配置…</p>
   }
+
   const readOnly = state?.writable === false
 
-  /** 改一个字段（只动草稿）。 */
-  const edit = (path: string, value: unknown): void => {
-    setDraft((prev) => ({ ...prev, [path]: value }))
+  /** 改一个字段（只动草稿，不写宿主）。 */
+  const edit = (path: string, next: unknown): void => {
+    setDraft((prev) => ({ ...prev, [path]: next }))
     setDirty(true)
     setMessage('')
   }
 
-  /** 保存：只提交变过的字段。 */
+  /**
+   * 保存：把草稿 diff 成 op 数组，一次 mutate 提交。
+   *
+   * 为什么一次提交而不是逐字段：宿主对每次 mutate 都做一次校验 + 重挂解析，
+   * 逐字段会把「改三项」变成三次重挂，中间态还可能被别的页面读到。
+   */
   const save = async (): Promise<void> => {
-    if (form === undefined) return
-    const patch = draftToPatch(draft, baseline)
-    const sections = Object.keys(patch)
-    if (sections.length === 0) {
+    const ops = draftToOps(draft, baseline)
+    if (ops.length === 0) {
       setMessage('没有改动')
       return
     }
     setBusy(true)
     try {
-      // 逐字段 set：契约是「串行排队 + 各自带最新修订号」，
-      // 用 mutate 一次性提交也可以，但逐字段能精确定位哪个被拒。
-      const rejected: string[] = []
-      for (const section of sections) {
-        const sectionPatch = patch[section] ?? {}
-        for (const [key, value] of Object.entries(sectionPatch)) {
-          const field = section + '.' + key
-          const accepted = await form.set(field, value)
-          if (!accepted) rejected.push(field)
-        }
-      }
-      if (rejected.length === 0) {
+      const accepted = await form.mutate(ops, revision)
+      if (accepted) {
         setMessage('已保存')
         setDirty(false)
-        setBaseline(state?.value)
       } else {
-        setMessage('以下字段被宿主拒绝：' + rejected.join('、'))
+        setMessage('宿主拒绝了本次保存：值可能已被别处改动，已重新读取最新值')
       }
     } catch (error) {
       setMessage('保存失败：' + (error instanceof Error ? error.message : String(error)))
@@ -127,8 +138,8 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
 
   /** 放弃改动。 */
   const reset = (): void => {
-    setDraft(snapshotToDraft(state?.value, controls))
-    setBaseline(state?.value)
+    setDraft(snapshotToDraft(value, controls))
+    setBaseline(value)
     setDirty(false)
     setMessage('')
   }
@@ -151,14 +162,14 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
         <section key={section} style={{ marginTop: '18px' }}>
           <h4 style={{ margin: '0 0 10px', fontSize: '13px' }}>{SECTION_LABELS[section] ?? section}</h4>
           {(bySection.get(section) ?? []).map((c) => {
-            const value = draft[c.path]
+            const current = draft[c.path]
             if (c.kind === 'boolean') {
               return (
                 <div key={c.path} style={fieldStyle}>
                   <label style={{ ...labelStyle, display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <input
                       type="checkbox"
-                      checked={value === true}
+                      checked={current === true}
                       disabled={readOnly || busy}
                       onChange={(e) => edit(c.path, e.target.checked)}
                     />
@@ -174,7 +185,7 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
                   <label style={labelStyle}>{c.label}</label>
                   <select
                     style={inputStyle}
-                    value={typeof value === 'string' ? value : ''}
+                    value={typeof current === 'string' ? current : ''}
                     disabled={readOnly || busy}
                     onChange={(e) => edit(c.path, e.target.value)}
                   >
@@ -190,7 +201,7 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
                 <input
                   style={inputStyle}
                   type={c.kind === 'number' ? 'number' : 'text'}
-                  value={typeof value === 'number' || typeof value === 'string' ? String(value) : ''}
+                  value={typeof current === 'number' || typeof current === 'string' ? String(current) : ''}
                   disabled={readOnly || busy}
                   {...(c.min === undefined ? {} : { min: c.min })}
                   {...(c.max === undefined ? {} : { max: c.max })}
@@ -224,4 +235,3 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
 
 /** 供测试引用：控件描述。 */
 export type { Control }
-

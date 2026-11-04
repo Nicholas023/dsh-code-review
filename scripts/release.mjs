@@ -119,15 +119,30 @@ for (const required of ['LICENSE', 'NOTICE']) {
 }
 
 // ── 5. 入口可加载（真的跑一次） ──
+//
+// 这里不只查 name，还查 **Config 导出**，因为它的缺失是完全静默的：
+// 宿主 dsh-settings 认配置 schema 的判据是 "toJSON" in Config，
+// 少了它插件就不会出现在设置命名空间里，插件页拿不到 form，
+// 表现为「设置面板就是不出来」，而控制台一行错都没有。
 if (existsSync(entry)) {
+  const probe = [
+    "import('./dist/plugin/index.js').then((m) => {",
+    "  const problems = [];",
+    "  if (m.name !== 'dsh-code-review') problems.push('name');",
+    "  if (m.Config === undefined) problems.push('Config 未导出');",
+    "  else if (!('toJSON' in m.Config)) problems.push('Config 缺 toJSON（宿主会判定为无效 schema）');",
+    "  else {",
+    "    const json = m.Config.toJSON();",
+    "    if (json === null || json.type !== 'object' || json.dict === undefined) problems.push('Config.toJSON() 形状不对');",
+    "    else if (Object.keys(json.dict).length === 0) problems.push('Config 没有任何分区');",
+    "  }",
+    '  if (problems.length > 0) { console.error(problems.join(' / ')); process.exit(1); }',
+    '})',
+  ].join('\n');
   try {
-    execFileSync(
-      process.execPath,
-      ['--input-type=module', '-e', "import('./dist/plugin/index.js').then(m => { if (m.name !== 'dsh-code-review') process.exit(1) })"],
-      { cwd: ROOT, stdio: 'pipe' },
-    )
+    execFileSync(process.execPath, ['--input-type=module', '-e', probe], { cwd: ROOT, stdio: 'pipe' })
   } catch (error) {
-    fail('入口加载失败：' + String(error.message ?? error))
+    fail('入口加载失败（name / Config 导出 / toJSON 之一不达标）：' + String(error.message ?? error))
   }
 }
 

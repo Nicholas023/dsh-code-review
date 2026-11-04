@@ -49,6 +49,39 @@ describe('字段描述', () => {
     expect(Array.isArray(r.issues)).toBe(true)
   })
 
+  it('Config 带 toJSON（宿主认配置 schema 的唯一判据）', () => {
+    // dsh-settings 的判断是 "toJSON" in schema，缺了这份描述会被判为无效，
+    // 插件就不会出现在设置命名空间里，插件页也拿不到 form。
+    expect('toJSON' in Config).toBe(true)
+    expect(typeof Config.toJSON).toBe('function')
+  })
+
+  it('toJSON 产出可被宿主水合的纯 JSON（含 type/meta/dict）', () => {
+    const json = Config.toJSON() as { type: string; meta: Record<string, unknown>; dict: Record<string, unknown> }
+    expect(json.type).toBe('object')
+    expect(json.meta).toBeTruthy()
+    expect(json.dict).toBeTruthy()
+    expect(Object.keys(json.dict)).toContain('review')
+    // 产物里不能残留函数（否则宿主 JSON.parse 会炸）
+    const roundTripped = JSON.parse(JSON.stringify(json)) as { dict: Record<string, { type: string }> }
+    expect(roundTripped.dict.review!.type).toBe('object')
+  })
+
+  it('toJSON 每次返回新对象（宿主会就地删 volatile，共享会污染后续读取）', () => {
+    const a = Config.toJSON() as { dict: Record<string, unknown> }
+    const b = Config.toJSON() as { dict: Record<string, unknown> }
+    expect(a).not.toBe(b)
+    expect(a.dict).not.toBe(b.dict)
+  })
+
+  it('可编辑字段在 toJSON 里保留 volatile 标记', () => {
+    const json = Config.toJSON() as {
+      dict: Record<string, { dict?: Record<string, { meta?: { volatile?: boolean } }> }>
+    }
+    const endpoint = json.dict.review?.dict?.endpoint
+    expect(endpoint?.meta?.volatile).toBe(true)
+  })
+
   it('configObject 拒绝数组与非对象', () => {
     expect(() => configObject([])).toThrow()
     expect(() => configObject('x')).toThrow()

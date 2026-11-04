@@ -11,22 +11,46 @@
  *  - 不再 spawn codecheck.exe，改为拉起 Node 内核；
  *  - 不再把引擎输出当结果，改为读任务卡的 summary；
  *  - 参数校验只有一处（plugin/submit.ts），工具和命令共用。
+ *
+ * 0.2.0 的配置来源（关键约定，别改回去）：
+ *  - 这里 **export const Config**，宿主据此生成设置命名空间，插件页才有配置表单；
+ *  - 配置的唯一真源是宿主的 profile 行（cordis patch 的 config:）；
+ *  - 宿主校验后把配置作为 apply 的第二个参数交回来，配置一改就重挂本行，天然热生效；
+ *  - 内核**不读任何配置文件**：配置在提交时被拍进任务卡（见 store/task-store.ts），
+ *    所以「改设置会影响已提交的任务」这件事不可能发生。
  */
 
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ensureLegacyMigrated } from '../config/migrate-legacy.js'
-import { readConfigFile } from '../config/store.js'
+import { normalizeConfig } from '../config/schema.js'
 import { configFilePath, resolveDshRoot } from '../store/paths.js'
 import { listTasks, readTask, requestCancellation } from '../store/task-store.js'
+import { settingsConfig, CONFIG_FIELDS, configObject } from '../settings/schema.js'
 import { presentSubmitted, presentTask, presentTaskList } from './present.js'
 import { ensureKernel } from './process.js'
 import { submitReview, type ReviewArgs } from './submit.js'
-import { applyConfigPatch, presentSetConfigResult } from './set-config.js'
+import {
+  planConfigPatch,
+  presentSetConfigResult,
+  writeConfigThroughHost,
+  type ConfigEditorLike,
+} from './set-config.js'
 
 /** 插件名（Cordis 识别用）。 */
 export const name = 'dsh-code-review'
+
+/**
+ * 设置描述：宿主靠它生成设置命名空间与表单。
+ *
+ * 导出的名字必须是 Config —— Cordis 只认这个名字。
+ * 缺了它，插件页那一行永远拿不到 form（读不到值也存不了盘），且不会报错。
+ */
+export const Config = settingsConfig(
+  (value) => normalizeConfig(configObject(value)).config,
+  CONFIG_FIELDS,
+)
 
 /** 必需服务。 */
 export const inject = ['tools']
@@ -36,11 +60,16 @@ export const TOOL_NAME = 'code_review'
 export const STATUS_TOOL_NAME = 'code_review_status'
 export const SET_CONFIG_TOOL_NAME = 'code_review_set_config'
 
+/** 本插件在组合树里的行 id（与 cordis.patch.yml 一致）。 */
+const ENTRY_ID = 'dsh-code-review'
+
 /** Cordis 上下文的最小形状（避免依赖宿主类型包）。 */
 interface Ctx {
   readonly tools: { register: (tool: unknown) => () => void }
   readonly commands?: { register: (cmd: unknown) => () => void }
   readonly inject: (names: readonly string[], cb: (sctx: Ctx) => void) => void
+  /** 按名字取服务（缺失返回 undefined，不抛）。 */
+  readonly get?: (serviceName: string) => unknown
   readonly logger?: { info?: (m: string) => void; warn?: (m: string) => void }
 }
 
@@ -51,11 +80,40 @@ function distRoot(): string {
   return resolve(here, '..')
 }
 
-/** 读取当前配置（每次调用重读，热生效）。 */
-function currentConfig(dshRoot: string) {
-  // 幂等：只有「新文件不存在且旧文件存在」时才真的搬，搬完再读
-  ensureLegacyMigrated(dshRoot)
-  return readConfigFile(configFilePath(dshRoot)).config
+/**
+ * 把宿主传来的配置收敛成可用形状。
+ *
+ * 正常路径：Cordis 已经用我们的 Config 做过 resolveConfig，这里拿到的就是归一化结果。
+ * 兜底路径：宿主没给（例如本地测试、或某些老版本装载器）时退回默认值并告警，
+ *          而不是让整个插件挂掉 —— 评审功能不该因为配置层退化而不可用。
+ */
+export function resolvePluginConfig(raw: unknown, ctx?: Ctx): ReturnType<typeof normalizeConfig>['config'] {
+  try {
+    return normalizeConfig(configObject(raw)).config
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx?.logger?.warn?.('[dsh-code-review] 配置无效，已退回默认值：' + message)
+    return normalizeConfig({}).config
+  }
+}
+
+/** 旧版配置文件只做提示，不再读取（避免和宿主形成双真源）。 */
+let legacyNoticeShown = false
+function noticeLegacyConfigOnce(ctx: Ctx): void {
+  if (legacyNoticeShown) return
+  legacyNoticeShown = true
+  try {
+    const file = configFilePath(resolveDshRoot())
+    if (existsSync(file)) {
+      ctx.logger?.warn?.(
+        '[dsh-code-review] 检测到旧版配置文件 ' + file +
+        '：0.2.0 起配置改由 DSH 的设置页管理，该文件不再被读取。' +
+        '请在「插件 → dsh-code-review」里重新填写（旧文件不会被删除或修改）。',
+      )
+    }
+  } catch {
+    // 读不到路径不影响插件运行
+  }
 }
 
 /** 提交一次评审（工具与命令共用）。 */
@@ -64,9 +122,9 @@ export function doSubmit(
   ctx: Ctx,
   cwdHint: string | undefined,
   sessionId: string | null,
+  config: ReturnType<typeof normalizeConfig>['config'],
 ): { ok: boolean; text: string; taskId: string | null } {
   const dshRoot = resolveDshRoot()
-  const config = currentConfig(dshRoot)
   const result = submitReview(args, {
     dshRoot,
     now: () => new Date().toISOString(),
@@ -120,8 +178,21 @@ export function cancelPayload(taskId: string | undefined): string {
   }
 }
 
+/** 从上下文里取宿主的配置编辑器（缺失返回 undefined）。 */
+export function configEditorOf(ctx: Ctx): ConfigEditorLike | null {
+  try {
+    const service = ctx.get?.('configEditor')
+    if (service === undefined || service === null) return null
+    const candidate = service as Partial<ConfigEditorLike>
+    if (typeof candidate.entries !== 'function' || typeof candidate.edit !== 'function') return null
+    return service as ConfigEditorLike
+  } catch {
+    return null
+  }
+}
+
 /** 创建 code_review 工具。 */
-function createReviewTool(ctx: Ctx) {
+function createReviewTool(ctx: Ctx, config: ReturnType<typeof normalizeConfig>['config']) {
   return {
     name: TOOL_NAME,
     description: [
@@ -158,20 +229,21 @@ function createReviewTool(ctx: Ctx) {
       const session = exec?.session
       const cwdHint = session?.header?.cwd
       const sessionId = typeof session?.id === 'string' ? session.id : null
-      const r = doSubmit(args ?? {}, ctx, cwdHint, sessionId)
+      const r = doSubmit(args ?? {}, ctx, cwdHint, sessionId, config)
       return r.taskId === null ? { ok: r.ok, text: r.text } : { ok: r.ok, text: r.text, task_id: r.taskId }
     },
   }
 }
 
 /** 创建 code_review_set_config 工具。 */
-function createSetConfigTool() {
+function createSetConfigTool(ctx: Ctx) {
   return {
     name: SET_CONFIG_TOOL_NAME,
     description: [
       '修改插件配置。传 { "review.endpoint": "...", "budget.maxAgentRounds": 3 } 这样的扁平键值对。',
       '字段会被逐条校验：未知字段、只读字段、类型不符都会被拒绝并回显原因。',
-      '写入时只改动被点名的路径，配置文件里的其他内容（含未知字段）原样保留。',
+      '写入时只改动被点名的路径，配置里其他内容（含未知字段）原样保留。',
+      '写的是 DSH 自己的 profile 配置，与设置页完全同一份，改完立即生效。',
     ].join(' '),
     parameters: {
       type: 'object',
@@ -194,9 +266,21 @@ function createSetConfigTool() {
       if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
         return { ok: false, text: '❌ patch 必须是对象，形如 { "review.model": "deepseek-flash" }' }
       }
-      const dshRoot = resolveDshRoot()
-      const result = applyConfigPatch(patch, dshRoot)
-      return { ok: result.ok, text: presentSetConfigResult(result) }
+      const plan = planConfigPatch(patch as Record<string, unknown>)
+      const editor = configEditorOf(ctx)
+      if (editor === null) {
+        // 没有 configEditor 时不假装成功：写不进去就说写不进去
+        const write = {
+          ok: false,
+          path: '（宿主未提供 configEditor 服务）',
+          error: '当前 profile 不可写，无法保存配置；请在 DSH 的设置页里修改',
+        }
+        return { ok: false, text: presentSetConfigResult(plan, write) }
+      }
+      const write = plan.ok
+        ? await writeConfigThroughHost(plan.changes, editor, ENTRY_ID)
+        : { ok: false, path: editor.documentPath, error: plan.error ?? '补丁为空' }
+      return { ok: plan.ok && write.ok, text: presentSetConfigResult(plan, write) }
     },
   }
 }
@@ -210,7 +294,7 @@ function createStatusTool() {
       type: 'object',
       properties: {
         task_id: { type: 'string', description: '任务 id' },
-        cancel: { type: 'boolean', description: '设为 true 时取消该任务（排队中立即生效；执行中会在内核检查点停下）' },
+        cancel: { type: 'boolean', description: '设为 true 时取消任务（排队中立即生效；执行中会在内核检查点停下）' },
       },
       required: [],
     },
@@ -228,8 +312,15 @@ function createStatusTool() {
   }
 }
 
-/** Cordis apply 入口。 */
-export function apply(ctx: Ctx): () => void {
+/**
+ * Cordis apply 入口。
+ * @param ctx       宿主上下文
+ * @param rawConfig 宿主按 Config 校验后交回来的配置（配置一改就重挂这里）
+ */
+export function apply(ctx: Ctx, rawConfig?: unknown): () => void {
+  const config = resolvePluginConfig(rawConfig, ctx)
+  noticeLegacyConfigOnce(ctx)
+
   const disposers: Array<() => void> = []
   const register = (tool: unknown, label: string): void => {
     try {
@@ -238,9 +329,9 @@ export function apply(ctx: Ctx): () => void {
       ctx.logger?.warn?.('[dsh-code-review] ' + label + ' 注册失败：' + (error instanceof Error ? error.message : String(error)))
     }
   }
-  register(createReviewTool(ctx), TOOL_NAME)
+  register(createReviewTool(ctx, config), TOOL_NAME)
   register(createStatusTool(), STATUS_TOOL_NAME)
-  register(createSetConfigTool(), SET_CONFIG_TOOL_NAME)
+  register(createSetConfigTool(ctx), SET_CONFIG_TOOL_NAME)
 
   // 斜杠命令（可选服务，缺失不阻塞工具）
   try {
@@ -256,7 +347,7 @@ export function apply(ctx: Ctx): () => void {
             const raw = invocation?.agent?.session
             const cwd = raw?.header?.cwd
             const sid = typeof raw?.id === 'string' ? raw.id : null
-            const r = doSubmit({ repo_path: cwd }, ctx, cwd, sid)
+            const r = doSubmit({ repo_path: cwd }, ctx, cwd, sid, config)
             return r.text
           },
         }))

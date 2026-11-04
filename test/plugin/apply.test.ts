@@ -43,6 +43,19 @@ function makeCtx() {
   const tools: Array<{ name: string; execute?: (...args: unknown[]) => Promise<unknown> }> = []
   const commands: Array<{ name: string }> = []
   const warnings: string[] = []
+  // 宿主的 configEditor（假）：0.2.0 起配置由它写入，所以挂载测试必须提供它，
+  // 否则 code_review_set_config 只能诚实地回「profile 不可写」。
+  const written: Array<Record<string, unknown>> = []
+  const configEditor = {
+    documentPath: 'C:/fake/profile/cordis.yaml',
+    entries: () => [{ options: { id: 'dsh-code-review' } }],
+    async edit(
+      _entry: unknown,
+      change: (current: Record<string, unknown> | undefined) => Record<string, unknown>,
+    ): Promise<void> {
+      written.push(change({}))
+    },
+  }
   const ctx = {
     tools: {
       register: (tool: unknown) => {
@@ -59,12 +72,13 @@ function makeCtx() {
     inject: (names: readonly string[], cb: (sctx: unknown) => void) => {
       if (names.includes('commands')) cb(ctx)
     },
+    get: (serviceName: string) => (serviceName === 'configEditor' ? configEditor : undefined),
     logger: {
       info: () => { /* 静默 */ },
       warn: (m: string) => { warnings.push(m) },
     },
   }
-  return { ctx, tools, commands, warnings }
+  return { ctx, tools, commands, warnings, written }
 }
 
 describe('插件挂载', () => {
@@ -145,13 +159,28 @@ describe('工具可调用', () => {
     dispose()
   })
 
-  it('code_review_set_config 能改配置并回显', async () => {
-    const { ctx, tools } = makeCtx()
+  it('code_review_set_config 把改动交给宿主并回显', async () => {
+    const { ctx, tools, written } = makeCtx()
     const dispose = apply(ctx as never)
     const setCfg = tools.find((t) => t.name === SET_CONFIG_TOOL_NAME)!
     const out = (await setCfg.execute!({ patch: { 'review.model': 'deepseek-flash' } })) as { ok: boolean; text: string }
     expect(out.ok).toBe(true)
     expect(out.text).toContain('review.model')
+    // 关键：确实走到了宿主，而不是自己写文件
+    expect(written).toHaveLength(1)
+    expect((written[0]!.review as { model: string }).model).toBe('deepseek-flash')
+    dispose()
+  })
+
+  it('code_review_set_config 在宿主没有 configEditor 时明说不可写', async () => {
+    const { ctx, tools } = makeCtx()
+    // 抹掉 configEditor，模拟只读部署
+    ;(ctx as { get?: unknown }).get = () => undefined
+    const dispose = apply(ctx as never)
+    const setCfg = tools.find((t) => t.name === SET_CONFIG_TOOL_NAME)!
+    const out = (await setCfg.execute!({ patch: { 'review.model': 'x' } })) as { ok: boolean; text: string }
+    expect(out.ok).toBe(false)
+    expect(out.text).toContain('不可写')
     dispose()
   })
 
