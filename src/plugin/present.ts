@@ -8,6 +8,7 @@
  * 避免 0.1.3 那种「工具一套文案、命令另一套」的漂移。
  */
 
+import { formatAmount } from '../domain/cost.js'
 import type { TaskRecord } from '../domain/task.js'
 
 /** 阶段 → 中文说明。 */
@@ -71,7 +72,7 @@ export function presentTask(record: TaskRecord): string {
       for (const w of warns) lines.push('- ' + w)
     }
     if (s.cost !== undefined && s.cost !== null) {
-      lines.push('**估算费用**：' + s.cost.amount.toFixed(2) + ' ' + s.cost.currency)
+      lines.push('**估算费用**：' + formatAmount(s.cost.amount) + ' ' + s.cost.currency)
     }
     if (s.reportPath !== null) lines.push('**报告**：' + s.reportPath)
     if (s.reportJsonPath !== null) lines.push('**机器可读**：' + s.reportJsonPath)

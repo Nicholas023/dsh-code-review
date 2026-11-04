@@ -13,6 +13,7 @@
 
 import type { Finding, FindingSeverity } from '../domain/finding.js'
 import { sortBySeverity } from '../domain/finding.js'
+import { formatAmount } from '../domain/cost.js'
 import type { ReviewReport } from './schema.js'
 
 /** 严重度图标。 */
@@ -164,7 +165,7 @@ export function renderMarkdown(report: ReviewReport): string {
   out.push('- 缓存命中 tokens：' + String(report.usage.cacheReadTokens))
   // 只有配了单价才有金额；没配就不显示（避免让人以为花了 0 元）
   if (report.usage.cost !== undefined && report.usage.cost !== null) {
-    out.push('- 估算费用：' + report.usage.cost.amount.toFixed(2) + ' ' + report.usage.cost.currency)
+    out.push('- 估算费用：' + formatAmount(report.usage.cost.amount) + ' ' + report.usage.cost.currency)
   }
   out.push('- 请求次数：' + String(report.usage.requests) + '（' + String(report.usage.agents) + ' 个 agent）')
   out.push('')

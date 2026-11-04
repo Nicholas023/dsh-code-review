@@ -84,9 +84,27 @@ export function estimateCost(usage: CostUsage, table: PriceTable | null | undefi
   )
 }
 
-/** 把金额格式化成两位小数（显示用）。 */
+/**
+ * 把金额格式化成人类可读串，**精度随量级自适应**。
+ *
+ * 为什么不能一律两位小数：费用上限允许设成 0.000001（试验/极小额），
+ * 一律 toFixed(2) 会把它显示成「0.00」，于是「费用 0.01 已超过上限 0.00」
+ * 这种提示等于没说 —— 实机出现过。小于一分钱时保留更多有效位。
+ */
+export function formatAmount(amount: number): string {
+  if (!Number.isFinite(amount)) return String(amount)
+  if (amount === 0) return '0'
+  const abs = Math.abs(amount)
+  if (abs >= 0.01) return amount.toFixed(2)
+  // 小于一分钱：先试 6 位，仍然被舍成 0 就用科学计数
+  const six = amount.toFixed(6)
+  if (Number(six) !== 0) return six.replace(/0+$/, '').replace(/\.$/, '')
+  return amount.toExponential(2)
+}
+
+/** 兼容旧名（报告与状态回显共用）。 */
 export function formatCost(amount: number): string {
-  return amount.toFixed(2)
+  return formatAmount(amount)
 }
 
 /**
@@ -104,8 +122,8 @@ export function formatCost(amount: number): string {
 export function costOvershootNotice(cost: number | null, maxCost: number, currency: string): string | null {
   if (cost === null || maxCost <= 0 || cost <= maxCost) return null
   return (
-    '本次费用 ' + cost.toFixed(2) + ' ' + currency +
-    ' 已超过上限 ' + maxCost.toFixed(2) + ' ' + currency +
+    '本次费用 ' + formatAmount(cost) + ' ' + currency +
+    ' 已超过上限 ' + formatAmount(maxCost) + ' ' + currency +
     '：上限只在发起下一次模型调用前检查，单次调用的实际费用无法预知'
   )
 }

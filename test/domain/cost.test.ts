@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { costOvershootNotice, estimateCost, formatCost, priceTableOf } from '../../src/domain/cost.js'
+import { costOvershootNotice, estimateCost, formatAmount, formatCost, priceTableOf } from '../../src/domain/cost.js'
 
 /** 一个填了单价的预算。 */
 const priced = {
@@ -68,8 +68,18 @@ describe('费用计算', () => {
 })
 
 describe('展示', () => {
-  it('金额保留两位小数', () => {
+  it('常规金额保留两位小数', () => {
     expect(formatCost(0.5678)).toBe('0.57')
+    expect(formatAmount(1)).toBe('1.00')
+  })
+
+  it('小于一分钱时保留有效位（不能被舍成 0.00）', () => {
+    expect(formatAmount(0.00747528)).toBe('0.007475')
+    expect(formatAmount(0.000001)).toBe('0.000001')
+  })
+
+  it('零显示为 0', () => {
+    expect(formatAmount(0)).toBe('0')
   })
 })
 
@@ -93,7 +103,9 @@ describe('超支提示', () => {
   it('超支时点名金额、上限与原因', () => {
     const msg = costOvershootNotice(0.0092, 0.000001, 'CNY')
     expect(msg).not.toBeNull()
-    expect(msg).toContain('0.01')
+    // 关键：0.000001 不能被显示成 0.00，否则「超了」看起来像「没超」
+    expect(msg).toContain('0.0092')
+    expect(msg).toContain('0.000001')
     expect(msg).toContain('超过上限')
     expect(msg).toContain('CNY')
   })
