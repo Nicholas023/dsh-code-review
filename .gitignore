@@ -54,6 +54,8 @@ node_modules/
 dist/
 # 发布产物（scripts/release.mjs 生成）
 release/
+# npm pack 产物
+*.tgz
 build/
 *.log
 npm-debug.log*

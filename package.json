@@ -12,8 +12,9 @@
   "files": [
     "dist",
     "cordis.patch.yml",
-    "dsh-plugin.json",
     "README.md",
+    "UPGRADING.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE"
   ],
