@@ -332,6 +332,10 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
   const severityCounts: Record<string, number> = {}
   for (const f of deduped) severityCounts[f.severity] = (severityCounts[f.severity] ?? 0) + 1
 
+  // 终态也要落一条：否则进度文件会永远停在 "reporting"，
+  // 界面上一条已经跑完的任务会一直显示成"在跑"（实机踩过）。
+  emitProgress({ stage: out.status === 'failed' ? 'failed' : 'completed', detail: out.status })
+
   return {
     ok: out.status !== 'failed',
     summary: {
