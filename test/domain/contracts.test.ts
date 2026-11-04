@@ -92,6 +92,7 @@ describe('Finding 契约', () => {
       recommendation: 'r',
       confidence: 0.8,
       sourceAgent: 'main',
+    sources: ['main'],
       sourceTask: null,
       ruleIds: [],
       status: 'confirmed',

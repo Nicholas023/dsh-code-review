@@ -57,7 +57,7 @@ function finding(overrides: Partial<Finding> = {}): Finding {
   return {
     id: 'f1', path: 'a.ts', lineStart: 2, lineEnd: 2, lineSource: 'exact',
     category: 'bug', severity: 'high', title: 't', evidence: 'e', explanation: 'x',
-    recommendation: 'r', confidence: 0.8, sourceAgent: 'main', sourceTask: null,
+    recommendation: 'r', confidence: 0.8, sourceAgent: 'main', sources: ['main'], sourceTask: null,
     ruleIds: [], status: 'confirmed', suppressionReason: null,
     fingerprint: 'a.ts|2|bug|e',
     ...overrides,

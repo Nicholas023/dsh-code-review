@@ -20,7 +20,7 @@ import { PROTOCOL_VERSIONS } from '../domain/version.js'
 import type { LlmClientOptions } from '../llm/client.js'
 import { runReview } from '../orchestrator/review.js'
 import type { RunnerOptions } from '../ptc/runner-client.js'
-import { fingerprint } from '../report/dedupe.js'
+import { dedupeFindings, fingerprint } from '../report/dedupe.js'
 import { renderMarkdown } from '../report/markdown.js'
 import { redactDeep } from '../report/redact.js'
 import type { ReviewReport } from '../report/schema.js'
@@ -195,14 +195,20 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
       explanation: raw.explanation,
       recommendation: raw.recommendation,
       confidence: raw.confidence,
-      sourceAgent: 'main',
-      sourceTask: null,
+      // 来源由编排层标注（主 agent = main，子 agent = child-<n>）
+      sourceAgent: raw.sourceAgent,
+      sources: [raw.sourceAgent],
+      sourceTask: raw.sourceTask,
       ruleIds: [],
       status: 'confirmed',
       suppressionReason: null,
       fingerprint: fingerprint(raw.path, raw.line, raw.category, raw.evidence),
     }
   })
+
+  // 去重：主 agent 与子 agent 会看到同一处代码，各自报一次。
+  // 这一步必须放在行号定位之后 —— 指纹含行号，定位前后是不同的键。
+  const deduped = dedupeFindings(findings)
 
   // 组装报告
   const generatedAt = deps.now()
@@ -232,7 +238,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     },
     hashes: { systemPrompt: null },
     status: out.status,
-    findings,
+    findings: deduped,
     sensitiveFiles: out.sensitiveFiles,
     excluded: out.excluded.map((e) => ({ path: e.path, reason: e.reason, detail: e.detail })),
     coverage: out.coverage,
@@ -256,14 +262,14 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
   })
 
   const severityCounts: Record<string, number> = {}
-  for (const f of findings) severityCounts[f.severity] = (severityCounts[f.severity] ?? 0) + 1
+  for (const f of deduped) severityCounts[f.severity] = (severityCounts[f.severity] ?? 0) + 1
 
   return {
     ok: out.status !== 'failed',
     summary: {
       reportPath: written.markdownPath,
       reportJsonPath: written.jsonPath,
-      findingCount: findings.length,
+      findingCount: deduped.length,
       severityCounts,
       coverage: out.coverage,
       usage: {

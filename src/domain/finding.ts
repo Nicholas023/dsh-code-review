@@ -70,8 +70,14 @@ export interface Finding {
   readonly recommendation: string
   /** 模型自评置信度 0~1。 */
   readonly confidence: number
-  /** 产出这条发现的 agent 标识（main / child-<n>）。 */
+  /** 产出这条发现的主 agent 标识（main / child-<n>）。 */
   readonly sourceAgent: string
+  /**
+   * 所有报过这条问题的 agent（去重合并时累加）。
+   * 主 agent 与子 agent 各自独立发现同一问题时，报告里要能看出「两路都报了」——
+   * 这比只说一句「main 报的」更有说服力。
+   */
+  readonly sources: readonly string[]
   /** 产出它的子任务 id（主 agent 直接产出时为 null）。 */
   readonly sourceTask: string | null
   /** 命中的规则 id（固定三视角 + 语言规则）。 */

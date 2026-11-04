@@ -193,7 +193,9 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
   warnings.push(...main.result.issues)
   if (main.error !== null) warnings.push('主 agent 失败：' + main.error.message)
 
-  const findings: RawFinding[] = [...main.result.findings]
+  // 打来源标记：主 agent 归 main，子 agent 归 child-<n>。
+  // 不标的话，报告里所有问题看起来都是主 agent 发现的，调子任务这件事就无从追溯。
+  const findings: RawFinding[] = main.result.findings.map((f) => ({ ...f, sourceAgent: 'main', sourceTask: null }))
 
   // ── 5. 派子 agent ──
   // 确定性规则打底 + 主 agent 追加（用户拍板 C）
@@ -266,7 +268,11 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
     usage.cacheReadTokens += child.usage.cacheReadTokens
     usage.requests += child.usage.requests
     warnings.push(...child.result.issues)
-    findings.push(...child.result.findings)
+    findings.push(...child.result.findings.map((f) => ({
+      ...f,
+      sourceAgent: 'child-' + String(childIndex),
+      sourceTask: reason,
+    })))
   }
 
   // ── 5.5 行号定位 ──

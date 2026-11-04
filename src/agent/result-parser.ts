@@ -14,6 +14,10 @@ import type { FindingCategory, FindingSeverity, LineSource } from '../domain/fin
 
 /** 模型返回的原始发现（未经行号定位与去重）。 */
 export interface RawFinding {
+  /** 产出它的 agent（main / child-<n>），由编排层填写。 */
+  sourceAgent: string
+  /** 产出它的子任务标识（主 agent 为 null）。 */
+  sourceTask: string | null
   readonly path: string
   readonly line: number | null
   readonly category: FindingCategory
@@ -94,6 +98,9 @@ function parseFinding(raw: unknown, issues: string[]): RawFinding | null {
       : 0.5
 
   return {
+    // 来源由调用方（编排层）填写，这里给一个安全的默认值
+    sourceAgent: 'main',
+    sourceTask: null,
     path: path.replace(/\\/g, '/'),
     line,
     category,

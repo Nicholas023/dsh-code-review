@@ -35,8 +35,21 @@ export function fingerprint(
   return [path, line === null ? '?' : String(line), category, normalizeEvidence(evidence)].join('|')
 }
 
+/** 合并两组来源，保持顺序并去重。 */
+function mergeSources(a: readonly string[], b: readonly string[]): string[] {
+  const out = [...a]
+  for (const s of b) {
+    if (!out.includes(s)) out.push(s)
+  }
+  return out
+}
+
 /**
- * 去重：同一指纹只保留一条。
+ * 去重：同一指纹只保留一条，但**合并全部来源**。
+ *
+ * 为什么合并来源而不是简单丢弃：主 agent 与子 agent 各自独立报出同一问题时，
+ * 「两路都发现了」是这条问题可信度的重要信号。只留一条会让报告丢掉这个信息。
+ *
  * @returns 去重后的列表（保持首次出现顺序）
  */
 export function dedupeFindings(findings: readonly Finding[]): Finding[] {
@@ -48,10 +61,10 @@ export function dedupeFindings(findings: readonly Finding[]): Finding[] {
       seen.set(key, f)
       continue
     }
-    // 保留置信度更高、或严重度更高的那条
-    if (f.confidence > existing.confidence) {
-      seen.set(key, f)
-    }
+    // 保留置信度更高的那条作为主体，但来源取并集
+    const winner = f.confidence > existing.confidence ? f : existing
+    const merged = mergeSources(existing.sources, f.sources)
+    seen.set(key, { ...winner, sources: merged })
   }
   return [...seen.values()]
 }
