@@ -74,6 +74,7 @@ export function makeDeps(dshRoot: string): ExecuteDeps {
   // dist/kernel/main.js → dist/ptc/runner-entry.js
   const runnerEntry = join(resolve(here, '..'), 'ptc', 'runner-entry.js')
   return {
+    dshRoot,
     resolveCredential: (ref: string) => resolveCredential(ref, { dshRoot }),
     nodePath: process.execPath,
     runnerEntry,

@@ -38,6 +38,15 @@ export interface ExecuteDeps {
   /** 当前时间（ISO-8601）。 */
   readonly now: () => string
   /**
+   * 数据根目录。
+   *
+   * 传了才写进度文件；不传就完全不写。
+   * 为什么这样设计：进度是"给人看的附加物"，而单测会直接调 executeTask。
+   * 一旦默认落到 resolveDshRoot()，测试就会往用户真实的 ~/.dsh 里写假任务
+   * （实机踩过：面板里冒出 dcr-e2e-repo / scan-1 这类永远停在"写报告"的条目）。
+   */
+  readonly dshRoot?: string
+  /**
    * 进度回调。
    * detail 给人看；round/maxRounds 让界面能画「第 5/8 轮」。
    */
@@ -166,6 +175,11 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     round?: number
     maxRounds?: number
   }): void => {
+    if (deps.dshRoot === undefined) {
+      // 没给根目录 = 不写进度（测试路径）
+      deps.onProgress?.(event)
+      return
+    }
     writeProgress({
       taskId: record.id,
       repoPath: record.scope.repoPath,
@@ -177,7 +191,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
       maxRounds: event.maxRounds ?? null,
       startedAt: progressStartedAt,
       updatedAt: deps.now(),
-    })
+    }, deps.dshRoot)
     deps.onProgress?.(event)
   }
 
