@@ -70,6 +70,9 @@ export function presentTask(record: TaskRecord): string {
       lines.push('**告警**：')
       for (const w of warns) lines.push('- ' + w)
     }
+    if (s.cost !== undefined && s.cost !== null) {
+      lines.push('**估算费用**：' + s.cost.amount.toFixed(2) + ' ' + s.cost.currency)
+    }
     if (s.reportPath !== null) lines.push('**报告**：' + s.reportPath)
     if (s.reportJsonPath !== null) lines.push('**机器可读**：' + s.reportJsonPath)
     const sev = s.severityCounts

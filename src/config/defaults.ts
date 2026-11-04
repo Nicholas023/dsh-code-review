@@ -54,7 +54,19 @@ export interface BudgetConfig {
   /** 单任务输出 token 上限。 */
   readonly maxOutputTokens: number
   /** 单任务费用上限（元）。 */
-  readonly maxCostCny: number
+  /**
+   * 单任务费用上限（单位见 currency）。
+   * **0 表示不限**；且只有当三个单价至少填了一个时才会真正计费。
+   */
+  readonly maxCost: number
+  /** 费用单位（仅影响展示与配置语义，不做汇率换算）。 */
+  readonly currency: Currency
+  /** 输入 token 单价（每百万 token）。0 = 未配置，与输出/缓存一起决定是否计费。 */
+  readonly inputPricePerMTok: number
+  /** 输出 token 单价（每百万 token）。 */
+  readonly outputPricePerMTok: number
+  /** 缓存命中 token 单价（每百万 token）。留 0 时按输入单价计。 */
+  readonly cacheReadPricePerMTok: number
   /** 主 agent 最大轮次。 */
   readonly maxAgentRounds: number
   /** 单任务最多派多少子 agent。 */
@@ -96,6 +108,9 @@ export const CONCURRENCY_MAX = 32
 export const TASK_TIMEOUT_MAX = 6 * 60 * 60 * 1000
 
 /** 默认配置（深拷贝安全：全部是原始值与一字面量对象）。 */
+/** 费用单位。只影响展示与语义，不做汇率换算。 */
+export type Currency = 'CNY' | 'USD'
+
 export const DEFAULT_CONFIG: ConfigV2 = {
   version: 2,
   review: {
@@ -116,7 +131,12 @@ export const DEFAULT_CONFIG: ConfigV2 = {
   budget: {
     maxInputTokens: 0,
     maxOutputTokens: 0,
-    maxCostCny: 0,
+    // 单价全为 0 = 不计费：用户不填就完全跳过费用统计与限制
+    maxCost: 0,
+    currency: 'CNY',
+    inputPricePerMTok: 0,
+    outputPricePerMTok: 0,
+    cacheReadPricePerMTok: 0,
     maxAgentRounds: 8,
     maxChildren: 8,
   },

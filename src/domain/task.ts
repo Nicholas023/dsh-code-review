@@ -152,6 +152,8 @@ export interface TaskSummary {
   readonly usage: Readonly<Record<string, number>> | null
   /** 实际耗时（秒）。 */
   readonly elapsedSec: number
+  /** 估算费用；未配置单价时为 null（不计量）。 */
+  readonly cost?: { readonly amount: number; readonly currency: string } | null
   /**
    * 评审的整体状态：completed / partial / failed。
    *

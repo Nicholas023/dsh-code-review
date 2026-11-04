@@ -30,6 +30,11 @@ export interface ReportUsage {
   readonly cacheReadTokens: number
   readonly requests: number
   readonly agents: number
+  /**
+   * 估算费用。**null 表示用户没填单价**，此时全链路不出现任何金额
+   * （不是「0 元」，是「不计量」——两者含义完全不同）。
+   */
+  readonly cost?: { readonly amount: number; readonly currency: string } | null
 }
 
 /** 完整报告。 */

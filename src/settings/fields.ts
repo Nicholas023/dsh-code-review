@@ -84,7 +84,11 @@ export const CONFIG_FIELDS: FieldDict = {
     dict: {
       maxInputTokens: editable('number', '单任务输入 token 上限。', { minimum: 0, maximum: 100000000 }),
       maxOutputTokens: editable('number', '单任务输出 token 上限。', { minimum: 0, maximum: 10000000 }),
-      maxCostCny: editable('number', '单任务费用上限（元）。', { minimum: 0, maximum: 100000 }),
+      maxCost: editable('number', '单任务费用上限（单位见「费用单位」）。0 表示不限；只有下面填了单价才会真正生效。', { minimum: 0, maximum: 100000 }),
+      currency: editable('string', '费用单位。只影响显示与语义，不做汇率换算（按你要用的货币把单价换算好再填）。', { enum: ['CNY', 'USD'] }),
+      inputPricePerMTok: editable('number', '输入 token 单价（每百万）。三项单价全为 0 = 不计费：不统计金额，也不因费用中断评审。', { minimum: 0, maximum: 1000000 }),
+      outputPricePerMTok: editable('number', '输出 token 单价（每百万）。', { minimum: 0, maximum: 1000000 }),
+      cacheReadPricePerMTok: editable('number', '缓存命中 token 单价（每百万）。留 0 时按输入单价计。', { minimum: 0, maximum: 1000000 }),
       maxAgentRounds: editable('number', '主 agent 最大轮次。', { minimum: 1, maximum: 50 }),
       maxChildren: editable('number', '最多派多少子 agent。', { minimum: 0, maximum: 64 }),
     },

@@ -244,7 +244,10 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     coverage: out.coverage,
     sizing: out.sizing,
     agents: out.agentStops.map((a) => ({ name: a.agent, stopReason: a.stopReason, rounds: a.rounds })),
-    usage: out.usage,
+    usage: {
+      ...out.usage,
+      cost: out.usage.cost === null ? null : { amount: out.usage.cost, currency: config.budget.currency },
+    },
     warnings: out.warnings,
     elapsedSec,
   }
@@ -296,6 +299,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
         agents: out.usage.agents,
       },
       elapsedSec,
+      cost: out.usage.cost === null ? null : { amount: out.usage.cost, currency: config.budget.currency },
       // 进程完成 ≠ 评审完成。把真实状态与告警一并带出去，
       // 否则上层只能看到「completed + 0 个问题」。
       status: out.status,

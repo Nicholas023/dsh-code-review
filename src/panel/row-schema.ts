@@ -88,7 +88,10 @@ export const GROUPS: readonly GroupSpec[] = [
     fields: [
       { path: ['budget', 'maxInputTokens'], label: '输入 token 上限', hint: '0 = 不限', min: 0, max: 100000000 },
       { path: ['budget', 'maxOutputTokens'], label: '输出 token 上限', hint: '0 = 不限', min: 0, max: 10000000 },
-      { path: ['budget', 'maxCostCny'], label: '费用上限（元）', hint: '0 = 不限', min: 0, max: 100000 },
+      { path: ['budget', 'maxCost'], label: '费用上限', hint: '0 = 不限；填了单价才生效', min: 0, max: 100000 },
+      { path: ['budget', 'inputPricePerMTok'], label: '输入单价（每百万）', hint: '三项全 0 = 不计费', min: 0, max: 1000000 },
+      { path: ['budget', 'outputPricePerMTok'], label: '输出单价（每百万）', hint: '每百万 token', min: 0, max: 1000000 },
+      { path: ['budget', 'cacheReadPricePerMTok'], label: '缓存命中单价（每百万）', hint: '留 0 按输入单价计', min: 0, max: 1000000 },
       { path: ['budget', 'maxAgentRounds'], label: '主 agent 轮次', hint: '越大越可能发现问题，也越贵', min: 1, max: 50 },
       { path: ['budget', 'maxChildren'], label: '子 agent 数量上限', hint: '0 表示不派子 agent', min: 0, max: 64 },
     ],

@@ -19,6 +19,7 @@ import {
   DEFAULT_CONFIG,
   TASK_TIMEOUT_MAX,
   type ConfigV2,
+  type Currency,
 } from './defaults.js'
 import type { SizingThresholds } from '../domain/review.js'
 
@@ -131,7 +132,20 @@ export function normalizeConfig(input: unknown): NormalizedConfig {
   const budget = {
     maxInputTokens: num(bd, 'maxInputTokens', DEFAULT_CONFIG.budget.maxInputTokens, 0, Number.MAX_SAFE_INTEGER, issues, 'budget'),
     maxOutputTokens: num(bd, 'maxOutputTokens', DEFAULT_CONFIG.budget.maxOutputTokens, 0, Number.MAX_SAFE_INTEGER, issues, 'budget'),
-    maxCostCny: num(bd, 'maxCostCny', DEFAULT_CONFIG.budget.maxCostCny, 0, Number.MAX_SAFE_INTEGER, issues, 'budget'),
+    // 旧键 maxCostCny 仍被接受：0.2.0 早期把它写在配置里，改名后不能让用户的设置凭空消失
+  maxCost: num(
+    bd,
+    'maxCost',
+    typeof bd.maxCostCny === 'number' ? bd.maxCostCny : DEFAULT_CONFIG.budget.maxCost,
+    0,
+    Number.MAX_SAFE_INTEGER,
+    issues,
+    'budget',
+  ),
+  currency: (bd.currency === 'USD' ? 'USD' : 'CNY') as Currency,
+  inputPricePerMTok: num(bd, 'inputPricePerMTok', DEFAULT_CONFIG.budget.inputPricePerMTok, 0, 1_000_000, issues, 'budget'),
+  outputPricePerMTok: num(bd, 'outputPricePerMTok', DEFAULT_CONFIG.budget.outputPricePerMTok, 0, 1_000_000, issues, 'budget'),
+  cacheReadPricePerMTok: num(bd, 'cacheReadPricePerMTok', DEFAULT_CONFIG.budget.cacheReadPricePerMTok, 0, 1_000_000, issues, 'budget'),
     maxAgentRounds: num(bd, 'maxAgentRounds', DEFAULT_CONFIG.budget.maxAgentRounds, 1, 50, issues, 'budget'),
     maxChildren: num(bd, 'maxChildren', DEFAULT_CONFIG.budget.maxChildren, 0, 64, issues, 'budget'),
   }

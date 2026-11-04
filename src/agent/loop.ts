@@ -20,6 +20,7 @@
  */
 
 import { KernelError, toKernelError } from '../domain/errors.js'
+import { estimateCost, type PriceTable } from '../domain/cost.js'
 import { callChatCompletion, type LlmClientOptions, type NormalizedUsage } from '../llm/client.js'
 import type { ChatMessage, ToolCall, ToolDefinition } from '../llm/protocol.js'
 import { runCodeProgram, type RunnerOptions } from '../ptc/runner-client.js'
@@ -39,6 +40,13 @@ export interface AgentLoopOptions {
   readonly maxInputTokens: number
   /** 最大输出 token。 */
   readonly maxOutputTokens: number
+  /**
+   * 单任务费用上限（单位同 prices.currency）。0 表示不限。
+   * 只有 prices 非 null（用户填了单价）时才会真正生效。
+   */
+  readonly maxCost: number
+  /** 价目表；null 表示用户没填单价 —— 全链路不计费、不设限。 */
+  readonly prices: PriceTable | null
   readonly runner: RunnerOptions
   /** 允许的工具（决定 SDK 能力）。 */
   readonly tools: readonly ('read' | 'glob' | 'grep')[]
@@ -55,12 +63,7 @@ export interface AgentLoopResult {
   readonly rounds: number
   readonly stopReason: StopReason
   /** 累计用量（多次调用的求和；缺字段保持 null）。 */
-  readonly usage: {
-    readonly inputTokens: number
-    readonly outputTokens: number
-    readonly cacheReadTokens: number
-    readonly requests: number
-  }
+  readonly usage: UsageTotals
   /** 出错时的结构化错误。 */
   readonly error: KernelError | null
 }
@@ -99,8 +102,24 @@ const RUN_CODE_TOOL: ToolDefinition = {
   },
 }
 
+/** 累计用量（含费用；费用为 null 表示未配置单价）。 */
+export interface UsageTotals {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  requests: number
+  /** 累计费用（与价目表同单位）；未配置单价时恒为 null。 */
+  cost: number | null
+}
+
+/** 把金额与单位拼成人类可读串。 */
+export function formatMoney(amount: number, prices: PriceTable | null): string {
+  const unit = prices === null ? '' : ' ' + prices.currency
+  return amount.toFixed(2) + unit
+}
+
 /** 把用量累加。 */
-function addUsage(total: { inputTokens: number; outputTokens: number; cacheReadTokens: number; requests: number }, u: NormalizedUsage | null): void {
+function addUsage(total: UsageTotals, u: NormalizedUsage | null): void {
   if (!u) return
   if (u.inputTokens !== null) total.inputTokens += u.inputTokens
   if (u.outputTokens !== null) total.outputTokens += u.outputTokens
@@ -144,7 +163,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     { role: 'user', content: opts.task },
   ]
   const tools: ToolDefinition[] = [FINISH_TOOL, RUN_CODE_TOOL]
-  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0 }
+  const usage: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, cost: null }
   let rounds = 0
   let emptyRounds = 0
 
@@ -153,6 +172,23 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     opts.onProgress?.({ round: rounds, kind: 'llm-call' })
 
     // 预算检查：超过就停，且明确标记为 budget（不是 finished）
+    //
+    // 费用检查只在「用户填了单价」且「设了上限」时生效：
+    // 单价全空时 usage.cost 恒为 null，这里永远不会命中 —— 与「不填就不计费」的约定一致。
+    if (opts.maxCost > 0 && usage.cost !== null && usage.cost > opts.maxCost) {
+      return {
+        result: {
+          findings: [],
+          needsMoreContext: [],
+          childRequests: [],
+          issues: ['已触及费用上限 ' + formatMoney(opts.maxCost, opts.prices) + '，评审未完成'],
+        },
+        rounds,
+        stopReason: 'budget',
+        usage,
+        error: null,
+      }
+    }
     if (opts.maxInputTokens > 0 && usage.inputTokens > opts.maxInputTokens) {
       return {
         result: { findings: [], needsMoreContext: [], childRequests: [], issues: ['已触及输入 token 预算，评审未完成'] },
@@ -192,6 +228,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
     usage.requests += 1
     addUsage(usage, callResult.usage)
+    usage.cost = estimateCost(usage, opts.prices)
 
     const choice = callResult.response.choices?.[0]
     const assistantMsg = choice?.message
@@ -323,7 +360,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 async function salvageFindings(
   opts: AgentLoopOptions,
   messages: ChatMessage[],
-  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; requests: number },
+  usage: UsageTotals,
 ): Promise<ParsedResult | null> {
   messages.push({
     role: 'user',

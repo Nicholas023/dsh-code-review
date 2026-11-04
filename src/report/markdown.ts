@@ -162,6 +162,10 @@ export function renderMarkdown(report: ReviewReport): string {
   out.push('- 输入 tokens：' + String(report.usage.inputTokens))
   out.push('- 输出 tokens：' + String(report.usage.outputTokens))
   out.push('- 缓存命中 tokens：' + String(report.usage.cacheReadTokens))
+  // 只有配了单价才有金额；没配就不显示（避免让人以为花了 0 元）
+  if (report.usage.cost !== undefined && report.usage.cost !== null) {
+    out.push('- 估算费用：' + report.usage.cost.amount.toFixed(2) + ' ' + report.usage.cost.currency)
+  }
   out.push('- 请求次数：' + String(report.usage.requests) + '（' + String(report.usage.agents) + ' 个 agent）')
   out.push('')
 

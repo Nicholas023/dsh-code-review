@@ -19,6 +19,7 @@
 
 import type { ConfigV2 } from '../config/defaults.js'
 import type { ReviewScope, SizeTier } from '../domain/review.js'
+import { priceTableOf } from '../domain/cost.js'
 import { classifySize, evaluateDispatch, mainAgentPolicy, needsFurtherSplit, type SizingThresholds } from '../domain/review.js'
 import { collectReviewDiff, listScanFiles, synthesizeWholeFile } from '../git/diff.js'
 import type { FileDiff } from '../git/diff-parser.js'
@@ -64,6 +65,8 @@ export interface ReviewOutput {
     readonly cacheReadTokens: number
     readonly requests: number
     readonly agents: number
+    /** 估算费用；未配置单价时恒为 null（不是 0 元，是不计量）。 */
+    readonly cost: number | null
   }
   /** 各 agent 的停止原因（可追溯）。 */
   readonly agentStops: readonly { readonly agent: string; readonly stopReason: string; readonly rounds: number }[]
@@ -103,7 +106,15 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
   const { scope, config } = input
   const warnings: string[] = []
   const agentStops: { agent: string; stopReason: string; rounds: number }[] = []
-  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, agents: 0 }
+  const usage: {
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    requests: number
+    agents: number
+    /** 累计费用；未配置单价时恒为 null（全链路不出现任何金额）。 */
+    cost: number | null
+  } = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, agents: 0, cost: null }
 
   // ── 1. 取 diff / 枚举文件 ──
   input.onProgress?.({ stage: 'collect' })
@@ -166,6 +177,14 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
   const totalTokens = selection.selected.reduce((sum, f) => sum + estimateFileTokens(f), 0)
   const tier = decideTier(scope.command, totalTokens, t)
   const policy = mainAgentPolicy(tier)
+  // 价目表：三个单价全为 0 时是 null —— 用户不填单价就完全不计费
+  const prices = priceTableOf(config.budget)
+  /** 子 agent 可用余额：任务总费用上限减去已花掉的。0 = 不限。 */
+  const remainingCost = (): number => {
+    if (config.budget.maxCost <= 0) return 0
+    if (usage.cost === null) return config.budget.maxCost
+    return Math.max(0, config.budget.maxCost - usage.cost)
+  }
   input.onProgress?.({ stage: 'sizing', detail: tier + ' / ' + String(totalTokens) + ' tokens' })
 
   // 大档：主 agent 只拿清单、不拿正文（否则上下文直接爆），
@@ -194,6 +213,8 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
     maxRounds: config.budget.maxAgentRounds,
     maxInputTokens: config.budget.maxInputTokens,
     maxOutputTokens: config.budget.maxOutputTokens,
+    maxCost: config.budget.maxCost,
+    prices,
     runner: input.runner,
     tools: policy.sdk ? ['read', 'glob', 'grep'] : [],
     ...(input.onProgress ? { onProgress: (e) => input.onProgress?.({ stage: 'main-agent', detail: 'round ' + String(e.round) }) } : {}),
@@ -202,6 +223,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
   usage.inputTokens += main.usage.inputTokens
   usage.outputTokens += main.usage.outputTokens
   usage.cacheReadTokens += main.usage.cacheReadTokens
+  if (prices !== null) usage.cost = (usage.cost ?? 0) + (main.usage.cost ?? 0)
   usage.requests += main.usage.requests
   warnings.push(...main.result.issues)
   if (main.error !== null) warnings.push('主 agent 失败：' + main.error.message)
@@ -283,6 +305,8 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
       maxRounds: config.budget.maxAgentRounds,
       maxInputTokens: config.budget.maxInputTokens,
       maxOutputTokens: config.budget.maxOutputTokens,
+      maxCost: remainingCost(),
+      prices,
       runner: input.runner,
       tools: ['read', 'glob', 'grep'],
     })
@@ -290,6 +314,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
     usage.inputTokens += child.usage.inputTokens
     usage.outputTokens += child.usage.outputTokens
     usage.cacheReadTokens += child.usage.cacheReadTokens
+    if (prices !== null) usage.cost = (usage.cost ?? 0) + (child.usage.cost ?? 0)
     usage.requests += child.usage.requests
     warnings.push(...child.result.issues)
     findings.push(...child.result.findings.map((f) => ({

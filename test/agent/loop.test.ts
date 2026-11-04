@@ -80,6 +80,8 @@ function baseOpts(url: string, overrides: Record<string, unknown> = {}) {
     maxRounds: 5,
     maxInputTokens: 0,
     maxOutputTokens: 1000,
+    maxCost: 0,
+    prices: null,
     runner: { nodePath: process.execPath, entryPath: ENTRY, timeoutMs: 10_000, memoryMb: 256 },
     tools: [] as Array<'read' | 'glob' | 'grep'>,
     ...overrides,
@@ -243,5 +245,42 @@ describe('输出被截断', () => {
     const r = await runAgentLoop(baseOpts(url) as never)
     expect(r.stopReason).toBe('no-progress')
     expect(r.error).toBeNull()
+  }, 60_000)
+})
+
+describe('费用上限', () => {
+  // 一次调用的用量是 100 输入 / 20 输出（见 scriptedServer 默认值）。
+  // 单价 2 / 8 元每百万 → 单次约 0.00036 元。
+  const prices = { currency: 'CNY' as const, inputPricePerMTok: 2, outputPricePerMTok: 8, cacheReadPricePerMTok: 0.2 }
+
+  it('超过费用上限时停止，并标记 budget', async () => {
+    const { url, calls } = await scriptedServer([
+      { toolCalls: [{ name: 'run_code', args: { program: 'return 1' } }] },
+      { toolCalls: [{ name: 'finish', args: { findings: [] } }] },
+    ])
+    // 上限低于单次成本 → 第二轮开始前就应停，不会再发请求
+    const r = await runAgentLoop(baseOpts(url, { maxCost: 0.0001, prices, tools: ['read'] }) as never)
+    expect(r.stopReason).toBe('budget')
+    expect(r.result.issues.join()).toContain('费用上限')
+    expect(calls()).toBe(1)
+  }, 60_000)
+
+  it('没填单价时费用上限不生效（不计费）', async () => {
+    const { url } = await scriptedServer([
+      { toolCalls: [{ name: 'run_code', args: { program: 'return 1' } }] },
+      { toolCalls: [{ name: 'finish', args: { findings: [] } }] },
+    ])
+    const r = await runAgentLoop(baseOpts(url, { maxCost: 0.0001, prices: null, tools: ['read'] }) as never)
+    expect(r.stopReason).toBe('finished')
+    expect(r.usage.cost).toBeNull()
+  }, 60_000)
+
+  it('填了单价就回传累计费用', async () => {
+    const { url } = await scriptedServer([
+      { toolCalls: [{ name: 'finish', args: { findings: [] } }] },
+    ])
+    const r = await runAgentLoop(baseOpts(url, { prices }) as never)
+    expect(r.usage.cost).not.toBeNull()
+    expect(r.usage.cost!).toBeGreaterThan(0)
   }, 60_000)
 })
