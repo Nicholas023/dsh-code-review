@@ -31,6 +31,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   bug: '缺陷',
   redundancy: '冗余',
   'scope-creep': '无关改动',
+  other: '未分类',
   'sensitive-file': '敏感文件',
 }
 

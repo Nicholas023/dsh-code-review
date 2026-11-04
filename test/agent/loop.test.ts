@@ -24,7 +24,7 @@ const servers: Server[] = []
 
 /** 一个按脚本回应的假端点：每次请求消费下一条脚本。 */
 async function scriptedServer(
-  responses: ReadonlyArray<{ content?: string; toolCalls?: Array<{ name: string; args: unknown }>; usage?: Record<string, number> }>,
+  responses: ReadonlyArray<{ content?: string; toolCalls?: Array<{ name: string; args: unknown }>; usage?: Record<string, number>; finishReason?: string }>,
 ): Promise<{ url: string; calls: () => number; bodies: () => string[] }> {
   let idx = 0
   // 记录每次请求的原始 body：有些参数错误只有在「发出去的报文」里才看得见
@@ -43,7 +43,10 @@ async function scriptedServer(
       }))
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({
-        choices: [{ message: { role: 'assistant', content: step.content ?? null, tool_calls: toolCalls.length > 0 ? toolCalls : undefined } }],
+        choices: [{
+          message: { role: 'assistant', content: step.content ?? null, tool_calls: toolCalls.length > 0 ? toolCalls : undefined },
+          finish_reason: step.finishReason ?? 'stop',
+        }],
         usage: step.usage ?? { prompt_tokens: 100, completion_tokens: 20 },
       }))
     })
@@ -218,5 +221,27 @@ describe('可复现性与轮次耗尽后的抢救', () => {
     expect(r.stopReason).toBe('max-rounds')
     expect(r.result.findings).toHaveLength(0)
     expect(r.result.issues.join()).toContain('最大轮次')
+  }, 60_000)
+})
+
+describe('输出被截断', () => {
+  it('finish_reason=length 且正文为空时立刻报错，不伪装成 0 个问题', async () => {
+    // 实机数据（同一端点、同一段代码）：
+    //   max_tokens=200 → reasoning 698 字、content 0 字
+    //   max_tokens=400 → reasoning 1435 字、content 0 字
+    // 推理模型会把输出预算全花在 reasoning 上，正文恒空。
+    // 若走「追问两次」路径，结局是 no-progress / max-rounds → 报告写「0 个问题」。
+    const { url } = await scriptedServer([{ content: '', finishReason: 'length' }])
+    const r = await runAgentLoop(baseOpts(url) as never)
+    expect(r.stopReason).toBe('error')
+    expect(r.error?.code).toBe('MODEL_RESPONSE_INVALID')
+    expect(r.error?.message).toContain('maxOutputTokens')
+  }, 60_000)
+
+  it('正常 stop 且正文为空时仍走原来的追问逻辑（不误判为截断）', async () => {
+    const { url } = await scriptedServer([{ content: '我觉得还行' }, { content: '真的还行' }])
+    const r = await runAgentLoop(baseOpts(url) as never)
+    expect(r.stopReason).toBe('no-progress')
+    expect(r.error).toBeNull()
   }, 60_000)
 })

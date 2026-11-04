@@ -54,7 +54,7 @@ export interface ParsedResult {
   readonly issues: readonly string[]
 }
 
-const CATEGORIES = new Set<FindingCategory>(['security', 'privacy', 'bug', 'redundancy', 'scope-creep', 'sensitive-file'])
+const CATEGORIES = new Set<FindingCategory>(['security', 'privacy', 'bug', 'redundancy', 'scope-creep', 'sensitive-file', 'other'])
 const SEVERITIES = new Set<FindingSeverity>(['critical', 'high', 'medium', 'low', 'info'])
 
 /** 安全转字符串。 */
@@ -74,15 +74,18 @@ function parseFinding(raw: unknown, issues: string[]): RawFinding | null {
     issues.push('发现缺少 path，已丢弃')
     return null
   }
-  const category = str(o.category) as FindingCategory
-  if (!CATEGORIES.has(category)) {
-    issues.push('未知 category ' + String(o.category) + '（' + path + '），已丢弃')
-    return null
+  // 未知分类**归类而不是丢弃**（实机踩过：模型返回 category:"info"，整条发现被静默丢掉，
+  // 报告显示「N 个问题」，而实际少了一条）。保留并标注，比悄悄消失强得多。
+  const rawCategory = str(o.category) as FindingCategory
+  const category = CATEGORIES.has(rawCategory) ? rawCategory : ('other' as FindingCategory)
+  if (category !== rawCategory) {
+    issues.push('未知 category ' + String(o.category) + '（' + path + '），已归类为 other')
   }
-  const severity = str(o.severity) as FindingSeverity
-  if (!SEVERITIES.has(severity)) {
-    issues.push('未知 severity ' + String(o.severity) + '（' + path + '），已丢弃')
-    return null
+  // 严重度同理：未知值降为 info（最不 alarming），并记录
+  const rawSeverity = str(o.severity) as FindingSeverity
+  const severity = SEVERITIES.has(rawSeverity) ? rawSeverity : ('info' as FindingSeverity)
+  if (severity !== rawSeverity) {
+    issues.push('未知 severity ' + String(o.severity) + '（' + path + '），已归类为 info')
   }
   const title = str(o.title).trim()
   if (title === '') {

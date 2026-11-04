@@ -196,9 +196,33 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     const choice = callResult.response.choices?.[0]
     const assistantMsg = choice?.message
     const toolCalls = assistantMsg?.tool_calls ?? []
+    const finishReason = choice?.finish_reason ?? null
 
-    // 模型没调工具：视为结束（避免无限追问） 
+    // 模型没调工具：视为结束（避免无限追问）
     if (toolCalls.length === 0) {
+      // finish_reason=length 是**确定性故障**，不是「模型没话说」。
+      //
+      // 这个模型会先生成 reasoning_content。实测（同一个端点、同一段代码）：
+      //   max_tokens=200 → reasoning 698 字、completion_tokens=200、content 0 字
+      //   max_tokens=400 → reasoning 1435 字、content 0 字
+      //   max_tokens=800 → reasoning 2643 字、content 0 字
+      // 也就是输出预算一旦不够，正文**必然**为空。
+      //
+      // 若走下面的「追问两次」路径，结局是 no-progress / max-rounds → 报告写「0 个问题」，
+      // 用户看到的是「干净」而不是「没跑成」。所以这里直接报错，并告诉用户改哪个配置。
+      if (finishReason === 'length') {
+        return {
+          result: { findings: [], needsMoreContext: [], childRequests: [], issues: [] },
+          rounds,
+          stopReason: 'error',
+          usage,
+          error: new KernelError(
+            'MODEL_RESPONSE_INVALID',
+            '模型输出被截断（finish_reason=length），正文为空：输出预算很可能被推理过程耗尽。' +
+              '请把 budget.maxOutputTokens 设为 0（不限）或调大到能容纳推理 + 正文。',
+          ),
+        }
+      }
       emptyRounds += 1
       messages.push({ role: 'assistant', content: assistantMsg?.content ?? '' })
       if (emptyRounds >= 2) {

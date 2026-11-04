@@ -58,15 +58,20 @@ describe('脏数据防御', () => {
     expect(r.issues.join()).toContain('path')
   })
 
-  it('未知 category 被丢弃', () => {
+  // 0.2.0 修正：未知枚举**不再丢弃整条发现**，而是归类保留。
+  // 原因：实机出现过模型返回 category:"info"，一条真实发现被静默丢掉，
+  // 报告的数字与模型实际报告的问题数对不上。
+  it('未知 category 被归类为 other 并保留', () => {
     const r = parseResult({ findings: [{ ...good, category: 'smell' }] })
-    expect(r.findings).toHaveLength(0)
+    expect(r.findings).toHaveLength(1)
+    expect(r.findings[0]!.category).toBe('other')
     expect(r.issues.join()).toContain('category')
   })
 
-  it('未知 severity 被丢弃', () => {
+  it('未知 severity 被归类为 info 并保留', () => {
     const r = parseResult({ findings: [{ ...good, severity: 'blocker' }] })
-    expect(r.findings).toHaveLength(0)
+    expect(r.findings).toHaveLength(1)
+    expect(r.findings[0]!.severity).toBe('info')
     expect(r.issues.join()).toContain('severity')
   })
 
@@ -123,5 +128,29 @@ describe('needsMoreContext', () => {
   it('过滤空串与非字符串', () => {
     const r = parseResult({ findings: [], needsMoreContext: ['需要看调用方', '', 123] })
     expect(r.needsMoreContext).toEqual(['需要看调用方'])
+  })
+})
+
+describe('未知枚举：归类而不是丢弃', () => {
+  it('未知 category 被归到 other，且发现本身保留', () => {
+    // 实机踩过：模型返回 category:"info"，整条发现被静默丢掉，
+    // 报告当时写「N 个问题」，实际少了一条。
+    const r = parseResult({ findings: [{ ...good, category: 'info' }] })
+    expect(r.findings).toHaveLength(1)
+    expect(r.findings[0]!.category).toBe('other')
+    expect(r.issues.join()).toContain('已归类为 other')
+  })
+
+  it('未知 severity 降为 info，且发现本身保留', () => {
+    const r = parseResult({ findings: [{ ...good, severity: 'blocker' }] })
+    expect(r.findings).toHaveLength(1)
+    expect(r.findings[0]!.severity).toBe('info')
+    expect(r.issues.join()).toContain('已归类为 info')
+  })
+
+  it('合法分类不受影响', () => {
+    const r = parseResult({ findings: [good] })
+    expect(r.findings[0]!.category).toBe('bug')
+    expect(r.issues.join()).not.toContain('归类')
   })
 })

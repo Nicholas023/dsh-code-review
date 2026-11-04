@@ -25,6 +25,7 @@ export type FindingCategory =
   | 'redundancy'   // 冗余代码（重复实现、死代码、无效分支）
   | 'scope-creep'  // 与任务无关的改动
   | 'sensitive-file' // 敏感文件点名（内容不送审，仅提示检查是否该提交）
+  | 'other'          // 模型给了我们不认识的分类：归到这里并保留，不丢弃
 
 /** 严重度。用于排序与聚合复核的优先级判断。 */
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info'
