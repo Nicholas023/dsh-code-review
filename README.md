@@ -59,12 +59,15 @@ npm run build
 
 ## 配置
 
-三种方式，效果等价：
+配置的**唯一真源是 DSH 的 profile**（这一行的 `config:`），由宿主的配置编辑器托管。
+插件不写任何自有配置文件，因此没有「插件配置和宿主配置对不上」的问题。
+
+两种方式，效果等价：
 
 1. **设置面板**（推荐）：DSH「插件」页 → dsh-code-review 行 → 配置。
    面板按分组渲染全部字段，改动先存草稿，点「保存」才写入。
 2. **会话工具**：`code_review_set_config({ patch: { "review.model": "..." } })`
-3. **直接编辑**：`~/.dsh/dsh-code-review/config.json`（首次启动自动迁移 0.1.x 的 `plugin-config.json`）
+   —— 它写的是同一份 profile 配置，改完立即生效。
 
 **端点与凭据必须在设置里显式填写**：
 
@@ -72,7 +75,13 @@ npm run build
 |---|---|
 | `review.endpoint` | 模型端点，如 `https://api.deepseek.com` |
 | `review.model` | 模型标识，如 `deepseek-flash` |
-| `review.credentialRef` | **凭据引用名**（环境变量名），不填明文 key |
+| `review.credentialRef` | **凭据引用名**：DSH 凭据库里的名字，或同名环境变量（如 `DEEPSEEK_API_KEY`）。只能是字母数字下划线，**不能含短横线**；填名字，不填明文 key |
+
+**费用（可选）**：`budget.inputPricePerMTok` / `outputPricePerMTok` / `cacheReadPricePerMTok`
+三项单价 + `budget.currency`（CNY / USD）。**三项全 0 就完全不计费**——不统计金额、也不设限；
+填了任意一项才启用 `budget.maxCost`。上限只在每次模型调用前检查，单次调用可能超支（超了报告里会点名）。
+
+> 从 0.1.x 过来？**不支持原地升级**，请卸载后重装：见 [UPGRADING.md](UPGRADING.md)。
 
 > 面板的「保存」只提交**改动过的字段** —— 没动的字段不会被重写，避免覆盖别人刚存的值。
 

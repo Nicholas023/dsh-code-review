@@ -26,7 +26,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeConfig } from '../config/schema.js'
 import { writeCachedCredential } from '../store/credential-cache.js'
-import { configFilePath, resolveDshRoot } from '../store/paths.js'
+import { configFilePath, legacyConfigFilePath, resolveDshRoot } from '../store/paths.js'
 import { resolveCredentialFromHost } from './credentials.js'
 import { listTasks, readTask, requestCancellation } from '../store/task-store.js'
 import { settingsConfig, CONFIG_FIELDS, configObject } from '../settings/schema.js'
@@ -99,25 +99,6 @@ export function resolvePluginConfig(raw: unknown, ctx?: Ctx): ReturnType<typeof 
   }
 }
 
-/** 旧版配置文件只做提示，不再读取（避免和宿主形成双真源）。 */
-let legacyNoticeShown = false
-function noticeLegacyConfigOnce(ctx: Ctx): void {
-  if (legacyNoticeShown) return
-  legacyNoticeShown = true
-  try {
-    const file = configFilePath(resolveDshRoot())
-    if (existsSync(file)) {
-      ctx.logger?.warn?.(
-        '[dsh-code-review] 检测到旧版配置文件 ' + file +
-        '：0.2.0 起配置改由 DSH 的设置页管理，该文件不再被读取。' +
-        '请在「插件 → dsh-code-review」里重新填写（旧文件不会被删除或修改）。',
-      )
-    }
-  } catch {
-    // 读不到路径不影响插件运行
-  }
-}
-
 /**
  * 把配置里指定的凭据解析出来，送到内核够得着的地方。
  *
@@ -144,6 +125,38 @@ async function forwardCredential(
   } catch (error) {
     return '凭据已解析（来源 ' + resolved.source + '）但写入内核缓存失败：' +
       (error instanceof Error ? error.message : String(error))
+  }
+}
+
+/**
+ * 旧版配置文件只做提示，绝不读取也绝不迁移。
+ *
+ * 为什么不做自动迁移（用户拍板）：0.2.0 换了引擎、也换了配置真源（从插件自有文件
+ * 搬到 DSH 的 profile 行）。两件事叠在一起做「自动迁移」，只会产出半新半旧的怪状态，
+ * 比让用户重装更容易出事。所以我们明说：**不支持从 0.1.x 原地升级**。
+ *
+ * 这个提示只出现一次，只列文件名，不读内容、不改文件。
+ */
+let legacyNoticeShown = false
+function noticeLegacyConfigOnce(ctx: Ctx): void {
+  if (legacyNoticeShown) return
+  legacyNoticeShown = true
+  try {
+    const root = resolveDshRoot()
+    const found: string[] = []
+    // 0.1.x 的配置，以及 0.2.0 早期版本的自有配置——两个都可能存在
+    for (const file of [legacyConfigFilePath(root), configFilePath(root)]) {
+      if (existsSync(file)) found.push(file)
+    }
+    if (found.length > 0) {
+      ctx.logger?.warn?.(
+        '[dsh-code-review] 发现旧版配置文件（不会被读取，也不会被修改）：' + found.join('、') +
+        '。0.2.0 是重写版本，**不支持从 0.1.x 原地升级**：' +
+        '请在「插件 → dsh-code-review」里重新填写端点、模型与凭据引用；确认无误后可自行删除上述文件。',
+      )
+    }
+  } catch {
+    // 读不到路径不影响插件运行
   }
 }
 
