@@ -28,6 +28,7 @@ import { normalizeConfig } from '../config/schema.js'
 import { writeCachedCredential } from '../store/credential-cache.js'
 import { configFilePath, legacyConfigFilePath, resolveDshRoot } from '../store/paths.js'
 import { parseReviewCommand } from './command-args.js'
+import { registerWebApi } from './webapi.js'
 import { resolveCredentialFromHost } from './credentials.js'
 import { listTasks, readTask, requestCancellation } from '../store/task-store.js'
 import { settingsConfig, CONFIG_FIELDS, configObject } from '../settings/schema.js'
@@ -383,6 +384,21 @@ export function apply(ctx: Ctx, rawConfig?: unknown): () => void {
   register(createReviewTool(ctx, config), TOOL_NAME)
   register(createStatusTool(), STATUS_TOOL_NAME)
   register(createSetConfigTool(ctx), SET_CONFIG_TOOL_NAME)
+
+  // 浏览器半区用的 HTTP 接口（可选服务：没有 webServer 就只是没有 GUI 进度面板）
+  try {
+    ctx.inject(['webServer'], (sctx) => {
+      try {
+        const webServer = (sctx as unknown as { webServer?: unknown }).webServer
+        if (webServer === undefined || webServer === null) return
+        for (const dispose of registerWebApi(webServer as never, ctx.logger)) disposers.push(dispose)
+      } catch (error) {
+        ctx.logger?.warn?.('[dsh-code-review] 进度接口注册失败：' + (error instanceof Error ? error.message : String(error)))
+      }
+    })
+  } catch (error) {
+    ctx.logger?.warn?.('[dsh-code-review] webServer 服务不可用，GUI 进度面板跳过：' + (error instanceof Error ? error.message : String(error)))
+  }
 
   // 斜杠命令（可选服务，缺失不阻塞工具）
   try {

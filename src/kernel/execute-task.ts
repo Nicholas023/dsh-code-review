@@ -25,6 +25,7 @@ import { renderMarkdown } from '../report/markdown.js'
 import { redact } from '../report/redact.js'
 import type { ReviewReport } from '../report/schema.js'
 import { writeReport } from '../report/writer.js'
+import { writeProgress } from '../plugin/progress.js'
 
 /** 执行所需的宿主能力（便于测试注入）。 */
 export interface ExecuteDeps {
@@ -36,8 +37,16 @@ export interface ExecuteDeps {
   readonly runnerEntry: string
   /** 当前时间（ISO-8601）。 */
   readonly now: () => string
-  /** 进度回调。 */
-  readonly onProgress?: (detail: string) => void
+  /**
+   * 进度回调。
+   * detail 给人看；round/maxRounds 让界面能画「第 5/8 轮」。
+   */
+  readonly onProgress?: (event: {
+    readonly stage: string
+    readonly detail?: string
+    readonly round?: number
+    readonly maxRounds?: number
+  }) => void
 }
 
 /** 执行结果。 */
@@ -147,7 +156,32 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     memoryMb: config.execution.runnerMemoryMb,
   }
 
-  deps.onProgress?.('reviewing')
+  // ── 进度上报 ──
+  // 内核的 stdout 在拉起时是 'ignore'（见 plugin/process.ts），全部丢弃。
+  // 所以进度只能落文件：<pluginRoot>/progress/<taskId>.json，由宿主的 HTTP 路由读给浏览器。
+  const progressStartedAt = deps.now()
+  const emitProgress = (event: {
+    stage: string
+    detail?: string
+    round?: number
+    maxRounds?: number
+  }): void => {
+    writeProgress({
+      taskId: record.id,
+      repoPath: record.scope.repoPath,
+      command: record.scope.command,
+      mode: record.scope.mode,
+      stage: event.stage,
+      detail: event.detail ?? null,
+      round: event.round ?? null,
+      maxRounds: event.maxRounds ?? null,
+      startedAt: progressStartedAt,
+      updatedAt: deps.now(),
+    })
+    deps.onProgress?.(event)
+  }
+
+  emitProgress({ stage: 'reviewing' })
   let out
   try {
     out = await runReview({
@@ -164,10 +198,11 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
       config,
       llm,
       runner,
-      ...(deps.onProgress ? { onProgress: (e) => deps.onProgress?.(e.stage) } : {}),
+      onProgress: (e) => emitProgress(e),
     })
   } catch (error) {
     const ke = error instanceof KernelError ? error : new KernelError('INTERNAL_UNEXPECTED', error instanceof Error ? error.message : String(error))
+    emitProgress({ stage: 'failed', detail: ke.message })
     return {
       ok: false,
       summary: null,
@@ -179,7 +214,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
   const elapsedSec = (Date.now() - startedAt) / 1000
 
   // 收敛 finding：行号定位 + 指纹
-  deps.onProgress?.('aggregating')
+  emitProgress({ stage: 'aggregating' })
   const findings: Finding[] = out.findings.map((raw, i) => {
     return {
       id: 'f-' + String(i + 1),
@@ -271,7 +306,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     // 它们是用于核对的标识，脱敏反而破坏可追溯性。
   }
 
-  deps.onProgress?.('reporting')
+  emitProgress({ stage: 'reporting' })
   const written = writeReport({
     directory: config.report.directory,
     repoName: repoNameOf(record.scope.repoPath),
