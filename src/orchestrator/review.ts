@@ -20,7 +20,7 @@
 import type { ConfigV2 } from '../config/defaults.js'
 import type { ReviewScope, SizeTier } from '../domain/review.js'
 import { classifySize, evaluateDispatch, mainAgentPolicy, needsFurtherSplit, type SizingThresholds } from '../domain/review.js'
-import { collectReviewDiff, listScanFiles } from '../git/diff.js'
+import { collectReviewDiff, listScanFiles, synthesizeWholeFile } from '../git/diff.js'
 import type { FileDiff } from '../git/diff-parser.js'
 import { summarizeDiff } from '../git/diff-parser.js'
 import type { LlmClientOptions } from '../llm/client.js'
@@ -80,14 +80,16 @@ function thresholdsOf(config: ConfigV2): SizingThresholds {
 /**
  * 决定本次评审的规模档位。
  *
- * 为什么 scan 要单独处理：scan 枚举的是文件清单，**没有 diff**，
- * 于是 estimateFileTokens 恒为 0，classifySize 必然判成小档 ——
- * 而小档的策略是「不给工具、只读 diff」，结果就是模型手上什么都没有，
- * 评审变成盲审。scan 的真实规模应该由文件数量与后续按需读取决定，
- * 所以固定按大档处理：主 agent 拿清单 + 工具，正文靠 read 按需取。
+ * 历史：scan 曾经被**无条件**判为大档，因为那时 scan 的文件没有 hunk，
+ * estimateFileTokens 恒为 0，不强制就会被判成小档 → 模型拿不到工具也拿不到正文 → 盲审。
+ *
+ * 现在 scan 会把文件整份合成（见本文件上方 scan 分支），体积是真实的，
+ * 于是「小仓库给正文、大仓库给清单 + 工具」这条正常规则对 scan 同样成立。
+ * 强制大档反而有害：一个 2 文件的小仓库也要多花几轮去 read，白白烧预算。
+ * @param command 评审模式（保留参数以便将来再分叉，当前两种模式规则一致）
  */
 export function decideTier(command: 'review' | 'scan', totalTokens: number, thresholds: SizingThresholds): SizeTier {
-  if (command === 'scan') return 'large'
+  void command
   return classifySize(totalTokens, thresholds)
 }
 
@@ -109,16 +111,27 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutput> {
   if (scope.command === 'scan') {
     const listed = await listScanFiles(scope.repoPath)
     warnings.push(...listed.warnings)
-    // scan 没有 diff：把每个文件当作「新增」处理会失真，所以这里只取文件清单，
-    // 内容由子 agent 通过 read 工具按需读取（见下方 large 档策略）。
-    files = listed.files.map((path) => ({
-      oldPath: path,
-      newPath: path,
-      status: 'modified' as const,
-      hunks: [],
-      additions: 0,
-      deletions: 0,
-    }))
+    // scan 没有 diff，所以把受支持的文件**整份**合成为「新增」，得到真实体积与内容。
+    //
+    // 为什么不能只给空清单（0.2.0 早期的写法，实机踩过）：
+    //   estimateFileTokens 只统计 hunk 行 → 每个文件恒为 0 →
+    //   ① 报表「规模 0 tokens」；
+    //   ② classifySize 必然小档，当年靠「scan 强制大档」打补丁；
+    //   ③ 单文件超限过滤形同虚设（maxFileTokens 永远不触发）；
+    //   ④ 任务提示词里「变更内容」是空的，文件清单写着 +0 -0，模型没有任何体积信号，
+    //      只能一轮读一个文件，很快撞上轮次上限 —— 表现为「评审没跑完但报 0 个问题」。
+    //
+    // 不受支持的扩展名仍然只留占位，让筛选层把它们干净地记进 excluded（不读盘）。
+    for (const path of listed.files) {
+      const supported = SUPPORTED_EXTENSIONS.some((ext) => path.toLowerCase().endsWith(ext))
+      if (!supported) {
+        files.push({ oldPath: path, newPath: path, status: 'modified', hunks: [], additions: 0, deletions: 0 })
+        continue
+      }
+      const made = synthesizeWholeFile(scope.repoPath, path)
+      if (made.warning !== null) warnings.push(made.warning)
+      if (made.diff !== null) files.push(made.diff)
+    }
   } else {
     const collected = await collectReviewDiff(scope.repoPath, scope)
     warnings.push(...collected.warnings)

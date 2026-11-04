@@ -117,7 +117,7 @@ export const DEFAULT_CONFIG: ConfigV2 = {
     maxInputTokens: 0,
     maxOutputTokens: 0,
     maxCostCny: 0,
-    maxAgentRounds: 3,
+    maxAgentRounds: 8,
     maxChildren: 8,
   },
   report: {

@@ -38,10 +38,15 @@ function splitLines(text: string): string[] {
 }
 
 /**
- * 把未跟踪文件合成为一个「整文件都是新增」的 FileDiff。
- * 这样模型看到的形状与新增文件完全一致，不需要特殊分支。
+ * 把一个整文件合成为「整文件都是新增」的 FileDiff。
+ *
+ * 两个地方在用：
+ *  - 工作区模式：未跟踪的新文件（本来是完整内容，只是还没进 git）；
+ *  - 全仓扫描：scan 没有 diff，必须靠它把文件变成「有体积、有内容」的条目。
+ *    否则下游的规模估算、超大文件过滤、提示词内容全是 0，模型等于盲审。
+ * 这样模型看到的形状与新增文件完全一致，下游不需要任何特殊分支。
  */
-function synthesizeAddedFile(repoPath: string, relPath: string): { diff: FileDiff | null; warning: string | null } {
+export function synthesizeWholeFile(repoPath: string, relPath: string): { diff: FileDiff | null; warning: string | null } {
   const abs = join(repoPath, relPath)
   try {
     const st = statSync(abs)
@@ -149,7 +154,7 @@ export async function collectReviewDiff(repoPath: string, scope: ReviewScope): P
     for (const raw of untracked.stdout.split(/\r?\n/)) {
       const rel = raw.trim()
       if (rel === '' || existing.has(rel)) continue
-      const made = synthesizeAddedFile(repoPath, rel)
+      const made = synthesizeWholeFile(repoPath, rel)
       if (made.warning) warnings.push(made.warning)
       if (made.diff) files.push(made.diff)
     }
