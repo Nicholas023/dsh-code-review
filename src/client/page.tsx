@@ -19,6 +19,7 @@ import {
   SECTION_ORDER,
   deriveControls,
   draftToOps,
+  parseNumberDraft,
   snapshotToDraft,
   valueAt,
   type Control,
@@ -115,7 +116,13 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
    * 逐字段会把「改三项」变成三次重挂，中间态还可能被别的页面读到。
    */
   const save = async (): Promise<void> => {
-    const ops = draftToOps(draft, baseline)
+    // 编辑期数字字段存的是原始文本，这里统一转成数字；非法文本明确报错
+    const parsed = parseNumberDraft(draft, controls)
+    if (!parsed.ok) {
+      setMessage('「' + parsed.field + '」不是合法数字：' + parsed.raw)
+      return
+    }
+    const ops = draftToOps(parsed.values, baseline)
     if (ops.length === 0) {
       setMessage('没有改动')
       return
@@ -200,19 +207,13 @@ export function CodeReviewSettings(props: PluginConfigViewProps) {
                 <label style={labelStyle}>{c.label}</label>
                 <input
                   style={inputStyle}
-                  type={c.kind === 'number' ? 'number' : 'text'}
+                  // 数字字段刻意用 text + inputMode：type="number" 会在编辑期吞掉
+                  // 中间态（"0." / 末尾小数点），小数根本打不进去
+                  type="text"
+                  {...(c.kind === 'number' ? { inputMode: 'decimal' as const } : {})}
                   value={typeof current === 'number' || typeof current === 'string' ? String(current) : ''}
                   disabled={readOnly || busy}
-                  {...(c.min === undefined ? {} : { min: c.min })}
-                  {...(c.max === undefined ? {} : { max: c.max })}
-                  onChange={(e) => {
-                    if (c.kind === 'number') {
-                      const n = Number(e.target.value)
-                      edit(c.path, Number.isFinite(n) ? n : 0)
-                    } else {
-                      edit(c.path, e.target.value)
-                    }
-                  }}
+                  onChange={(e) => edit(c.path, e.target.value)}
                 />
                 {c.hint !== '' && <span style={hintStyle}>{c.hint}</span>}
               </div>

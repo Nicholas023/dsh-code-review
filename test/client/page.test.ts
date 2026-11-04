@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { deriveControls, draftToOps, draftToPatch, snapshotToDraft } from '../../src/client/logic.js'
+import { deriveControls, draftToOps, draftToPatch, parseNumberDraft, snapshotToDraft } from '../../src/client/logic.js'
 
 describe('控件派生', () => {
   it('派生出的控件都带路径、标签与说明', () => {
@@ -135,5 +135,49 @@ describe('提交给宿主的 op 数组', () => {
 
   it('没有点号的脏路径被跳过（不让宿主收到非法 path）', () => {
     expect(draftToOps({ review: 'oops' }, {})).toEqual([])
+  })
+})
+
+describe('数字文本 → 数字（保存时解析）', () => {
+  const controls = deriveControls()
+
+  it('小数能完整保留（这是修 bug 的原因：编辑期不让转数字）', () => {
+    const r = parseNumberDraft({ 'budget.cacheReadPricePerMTok': '0.02' }, controls)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.values['budget.cacheReadPricePerMTok']).toBe(0.02)
+  })
+
+  it('尾随小数点（编辑中间态）能解析', () => {
+    const r = parseNumberDraft({ 'budget.inputPricePerMTok': '0.' }, controls)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.values['budget.inputPricePerMTok']).toBe(0)
+  })
+
+  it('空字符串视为 0（这些字段的 0 表示未配置/不限）', () => {
+    const r = parseNumberDraft({ 'budget.maxCost': '' }, controls)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.values['budget.maxCost']).toBe(0)
+  })
+
+  it('非法文本被明确拒绝，并指出是哪个字段', () => {
+    const r = parseNumberDraft({ 'budget.maxCost': 'abc' }, controls)
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.field).toBe('budget.maxCost')
+      expect(r.raw).toBe('abc')
+    }
+  })
+
+  it('非数字控件里的字符串原样保留（例如凭据引用名）', () => {
+    const r = parseNumberDraft({ 'review.credentialRef': 'COMMANDCODE_API_KEY' }, controls)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.values['review.credentialRef']).toBe('COMMANDCODE_API_KEY')
+  })
+
+  it('解析后的值与基线比较能正确判定「有没有改」', () => {
+    // 用户把 0.02 改成 0.03：应产生一条 op
+    const ops = draftToOps({ 'budget.cacheReadPricePerMTok': 0.03 }, { budget: { cacheReadPricePerMTok: 0.02 } })
+    expect(ops).toHaveLength(1)
+    expect(ops[0]!.value).toBe(0.03)
   })
 })

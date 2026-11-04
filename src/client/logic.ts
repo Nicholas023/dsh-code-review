@@ -100,6 +100,42 @@ export function deriveControls(): Control[] {
   return out
 }
 
+/**
+ * 把草稿里的「数字文本」解析成真正的数字。
+ *
+ * 为什么需要这一步：数字输入框在编辑期保存的是**原始文本**（例如 "0."、"0.02"、"1e3"），
+ * 因为一旦边打边转成数字，"0." 会被 Number() 归成 0 并立刻写回控件，
+ * 小数点被当场吃掉 —— 使用者根本打不出小数（实机踩过）。
+ * 所以只在保存这一刻做转换，非法文本明确拒绝，而不是悄悄变成 0。
+ *
+ * @param draft    草稿（数字控件里可能是字符串）
+ * @param controls 控件描述（用于判断哪些路径是数字）
+ * @returns 解析后的值；有非法项时给出具体字段
+ */
+export function parseNumberDraft(
+  draft: Readonly<Record<string, unknown>>,
+  controls: readonly Control[],
+): { ok: true; values: Record<string, unknown> } | { ok: false; field: string; raw: string } {
+  const numeric = new Set(controls.filter((c) => c.kind === 'number').map((c) => c.path))
+  const values: Record<string, unknown> = {}
+  for (const [path, value] of Object.entries(draft)) {
+    if (!numeric.has(path) || typeof value !== 'string') {
+      values[path] = value
+      continue
+    }
+    const raw = value.trim()
+    // 空字符串视为 0：这些字段的 0 本来就表示「未配置/不限」
+    if (raw === '') {
+      values[path] = 0
+      continue
+    }
+    const n = Number(raw)
+    if (!Number.isFinite(n)) return { ok: false, field: path, raw }
+    values[path] = n
+  }
+  return { ok: true, values }
+}
+
 /** 从宿主值里按路径取字段。 */
 export function valueAt(value: Record<string, unknown> | undefined, path: string): unknown {
   if (value === undefined) return undefined
