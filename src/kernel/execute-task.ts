@@ -112,7 +112,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
         message: '评审模型凭据引用未配置',
         retry: 'after-input-change',
         effectState: 'none',
-        nextAction: '在插件设置里填写凭据引用（指向已配置的环境变量）',
+        nextAction: '在插件设置里填写凭据引用（DSH 凭据名或环境变量名，例如 COMMANDCODE_API_KEY）',
         stage: 'preparing',
       },
     }
@@ -129,7 +129,7 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
         message: '凭据引用 ' + credentialRef + ' 未能解析出值',
         retry: 'after-input-change',
         effectState: 'none',
-        nextAction: '确认该环境变量已配置且非空',
+        nextAction: '确认 DSH 凭据库里存在该引用（或同名环境变量非空）；引用名只能是字母数字下划线',
         stage: 'preparing',
       },
     }

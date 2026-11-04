@@ -57,6 +57,19 @@ export function kernelInfoPath(dshRoot?: string): string {
   return join(kernelDir(dshRoot), 'info.json')
 }
 
+/**
+ * 内核凭据缓存。
+ *
+ * 为什么需要这个文件：DSH 把凭据存在自己的凭据库里（.credentials.yaml），
+ * 由宿主进程通过 ctx.credentials 提供 —— 内核是**独立进程**，拿不到那个服务，
+ * 也拿不到任何环境变量以外的形式。插件在提交时解析出值写在这里，内核读它。
+ *
+ * 位置在 kernel/ 下、权限 0600：与 DSH 自己的凭据文件同目录同保护级别。
+ */
+export function credentialCachePath(dshRoot?: string): string {
+  return join(kernelDir(dshRoot), 'credentials.json')
+}
+
 /** 单例锁文件。 */
 export function kernelLockPath(dshRoot?: string): string {
   return join(kernelDir(dshRoot), 'kernel.lock')

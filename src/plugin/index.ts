@@ -25,7 +25,9 @@ import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeConfig } from '../config/schema.js'
+import { writeCachedCredential } from '../store/credential-cache.js'
 import { configFilePath, resolveDshRoot } from '../store/paths.js'
+import { resolveCredentialFromHost } from './credentials.js'
 import { listTasks, readTask, requestCancellation } from '../store/task-store.js'
 import { settingsConfig, CONFIG_FIELDS, configObject } from '../settings/schema.js'
 import { presentSubmitted, presentTask, presentTaskList } from './present.js'
@@ -116,15 +118,48 @@ function noticeLegacyConfigOnce(ctx: Ctx): void {
   }
 }
 
+/**
+ * 把配置里指定的凭据解析出来，送到内核够得着的地方。
+ *
+ * 为什么在宿主进程做：内核是独立进程，拿不到 ctx.credentials；
+ * DSH 也不会把凭据写进 process.env。详见 plugin/credentials.ts 的文件头。
+ *
+ * **失败不阻断提交**：任务卡照样写，内核会用可操作的错误说明卡住。
+ * 让用户看到「任务已提交 + 凭据有问题」比「点了没反应」好得多。
+ * @returns 需要提示给用户的告警；一切正常时返回 null
+ */
+async function forwardCredential(
+  ctx: Ctx,
+  config: ReturnType<typeof normalizeConfig>['config'],
+  dshRoot: string,
+): Promise<string | null> {
+  const ref = config.review.credentialRef.trim()
+  // 空引用交给内核报 CONFIG_CREDENTIAL_MISSING，这里不重复造一套诊断
+  if (ref === '') return null
+  const resolved = await resolveCredentialFromHost((serviceName) => ctx.get?.(serviceName), ref)
+  if (resolved.value === null) return '凭据未解析：' + (resolved.detail ?? '未知原因')
+  try {
+    writeCachedCredential(dshRoot, ref, resolved.value)
+    return null
+  } catch (error) {
+    return '凭据已解析（来源 ' + resolved.source + '）但写入内核缓存失败：' +
+      (error instanceof Error ? error.message : String(error))
+  }
+}
+
 /** 提交一次评审（工具与命令共用）。 */
-export function doSubmit(
+export async function doSubmit(
   args: ReviewArgs,
   ctx: Ctx,
   cwdHint: string | undefined,
   sessionId: string | null,
   config: ReturnType<typeof normalizeConfig>['config'],
-): { ok: boolean; text: string; taskId: string | null } {
+): Promise<{ ok: boolean; text: string; taskId: string | null }> {
   const dshRoot = resolveDshRoot()
+
+  // 先把凭据送到内核够得着的地方（失败只告警，不阻断提交）
+  const credentialWarning = await forwardCredential(ctx, config, dshRoot)
+
   const result = submitReview(args, {
     dshRoot,
     now: () => new Date().toISOString(),
@@ -146,7 +181,9 @@ export function doSubmit(
   if (!launched.alive && launched.reason !== null) {
     ctx.logger?.warn?.('[dsh-code-review] 内核拉起失败：' + launched.reason)
   }
-  return { ok: true, text: presentSubmitted(result.taskId, 'queued'), taskId: result.taskId }
+  const text = presentSubmitted(result.taskId, 'queued') +
+    (credentialWarning === null ? '' : '\n\n⚠ ' + credentialWarning)
+  return { ok: true, text, taskId: result.taskId }
 }
 
 /** 查询任务状态。 */
@@ -229,7 +266,7 @@ function createReviewTool(ctx: Ctx, config: ReturnType<typeof normalizeConfig>['
       const session = exec?.session
       const cwdHint = session?.header?.cwd
       const sessionId = typeof session?.id === 'string' ? session.id : null
-      const r = doSubmit(args ?? {}, ctx, cwdHint, sessionId, config)
+      const r = await doSubmit(args ?? {}, ctx, cwdHint, sessionId, config)
       return r.taskId === null ? { ok: r.ok, text: r.text } : { ok: r.ok, text: r.text, task_id: r.taskId }
     },
   }
@@ -347,7 +384,7 @@ export function apply(ctx: Ctx, rawConfig?: unknown): () => void {
             const raw = invocation?.agent?.session
             const cwd = raw?.header?.cwd
             const sid = typeof raw?.id === 'string' ? raw.id : null
-            const r = doSubmit({ repo_path: cwd }, ctx, cwd, sid, config)
+            const r = await doSubmit({ repo_path: cwd }, ctx, cwd, sid, config)
             return r.text
           },
         }))

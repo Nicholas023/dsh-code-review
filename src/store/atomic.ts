@@ -13,11 +13,18 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-/** 原子写入文本。 */
-export function writeTextAtomic(path: string, content: string): void {
+/**
+ * 原子写入文本。
+ * @param path    目标路径
+ * @param content 内容
+ * @param mode    可选的文件权限（如凭据缓存用 0o600）。临时文件就按该权限创建，
+ *                rename 之后权限随文件走，不会出现「先宽后收」的窗口。
+ */
+export function writeTextAtomic(path: string, content: string, mode?: number): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = path + '.tmp.' + String(process.pid) + '.' + String(Date.now())
-  writeFileSync(tmp, content, 'utf8')
+  if (mode === undefined) writeFileSync(tmp, content, 'utf8')
+  else writeFileSync(tmp, content, { encoding: 'utf8', mode })
   try {
     renameSync(tmp, path)
   } catch {

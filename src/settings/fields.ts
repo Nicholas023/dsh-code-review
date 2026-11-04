@@ -63,7 +63,7 @@ export const CONFIG_FIELDS: FieldDict = {
       endpoint: editable('string', '模型端点（如 https://api.deepseek.com）。留空则评审直接失败，不会隐式兜底。'),
       model: editable('string', '模型标识（如 deepseek-flash）。'),
       protocol: editable('string', '协议（当前仅 openai-chat-completions）。', { enum: ['openai-chat-completions'] }),
-      credentialRef: editable('string', '凭据引用名（指向已配置的环境变量，不填明文 key）。'),
+      credentialRef: editable('string', '凭据引用名：DSH 凭据库里的名字或同名环境变量（如 COMMANDCODE_API_KEY）。只能字母数字下划线，不能有短横线；填名字，不要填明文 key。'),
       requestTimeoutMs: editable('number', '单次请求超时（毫秒）。', { minimum: 1000, maximum: 3600000 }),
       taskTimeoutMs: editable('number', '任务总超时（毫秒），只防死循环。', { minimum: 1000, maximum: 21600000 }),
     },
