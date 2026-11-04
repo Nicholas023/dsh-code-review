@@ -22,7 +22,7 @@ import { runReview } from '../orchestrator/review.js'
 import type { RunnerOptions } from '../ptc/runner-client.js'
 import { dedupeFindings, fingerprint } from '../report/dedupe.js'
 import { renderMarkdown } from '../report/markdown.js'
-import { redactDeep } from '../report/redact.js'
+import { redact } from '../report/redact.js'
 import type { ReviewReport } from '../report/schema.js'
 import { writeReport } from '../report/writer.js'
 
@@ -249,8 +249,24 @@ export async function executeTask(record: TaskRecord, deps: ExecuteDeps): Promis
     elapsedSec,
   }
 
-  // 输出前统一脱敏（报告自身不能成为泄露载体）
-  const safeReport = redactDeep(report)
+  // 脱敏：只处理**自由文本**，不碰结构化标识。
+  //
+  // 为什么不整体 redactDeep：commit SHA（40 位十六进制）会命中高熵规则被打成
+  // [REDACTED]，用户就无法核对「这次审的是哪个提交」；路径被脱敏则敏感文件
+  // 点名失去意义。脱敏的目标是「用户代码片段里的密钥」，不是「报告的所有字符串」。
+  const safeReport: ReviewReport = {
+    ...report,
+    findings: report.findings.map((f) => ({
+      ...f,
+      title: redact(f.title),
+      evidence: redact(f.evidence),
+      explanation: redact(f.explanation),
+      recommendation: redact(f.recommendation),
+    })),
+    warnings: report.warnings.map(redact),
+    // sensitiveFiles / excluded / repository / run / model 保持原样：
+    // 它们是用于核对的标识，脱敏反而破坏可追溯性。
+  }
 
   deps.onProgress?.('reporting')
   const written = writeReport({
