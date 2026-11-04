@@ -207,3 +207,39 @@ describe('与假端点交互', () => {
     }
   }, 20_000)
 })
+
+describe('缓存命中字段的兼容', () => {
+  it('认 DeepSeek 原生字段', () => {
+    const u = normalizeUsage({ prompt_tokens: 100, completion_tokens: 10, prompt_cache_hit_tokens: 60 })
+    expect(u?.cacheReadTokens).toBe(60)
+  })
+
+  it('认 OpenAI 兼容的 prompt_tokens_details.cached_tokens', () => {
+    // 实机踩过：聚合网关只给这个字段，而我们只读 DeepSeek 那个，
+    // 于是报表永远写「缓存命中 0」，看起来像是完全没有缓存。
+    const u = normalizeUsage({
+      prompt_tokens: 100,
+      completion_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 40 },
+    })
+    expect(u?.cacheReadTokens).toBe(40)
+  })
+
+  it('认部分网关的顶层 cached_tokens', () => {
+    const u = normalizeUsage({ prompt_tokens: 100, completion_tokens: 10, cached_tokens: 25 })
+    expect(u?.cacheReadTokens).toBe(25)
+  })
+
+  it('两种字段同时存在时以 DeepSeek 原生为准', () => {
+    const u = normalizeUsage({
+      prompt_cache_hit_tokens: 60,
+      prompt_tokens_details: { cached_tokens: 40 },
+    })
+    expect(u?.cacheReadTokens).toBe(60)
+  })
+
+  it('全都没有时为 null（不用 0 冒充）', () => {
+    const u = normalizeUsage({ prompt_tokens: 100, completion_tokens: 10 })
+    expect(u?.cacheReadTokens).toBeNull()
+  })
+})

@@ -47,13 +47,25 @@ export interface ChatRequest {
   readonly extraBody?: Readonly<Record<string, unknown>>
 }
 
-/** provider 返回的原始用量（字段可能缺失）。 */
+/**
+ * provider 返回的原始用量（字段可能缺失）。
+ *
+ * 缓存命中字段各家不一样，两个阵营都要认：
+ *  - DeepSeek 原生：prompt_cache_hit_tokens / prompt_cache_miss_tokens；
+ *  - OpenAI 兼容（含大多数聚合网关）：prompt_tokens_details.cached_tokens，
+ *    个别网关还会直接给顶层 cached_tokens。
+ * 只认一种的话，另一个阵营永远显示「缓存命中 0」。
+ */
 export interface RawUsage {
   readonly prompt_tokens?: number
   readonly completion_tokens?: number
   readonly total_tokens?: number
   readonly prompt_cache_hit_tokens?: number
   readonly prompt_cache_miss_tokens?: number
+  /** OpenAI 兼容的顶层缓存计数（部分网关）。 */
+  readonly cached_tokens?: number
+  /** OpenAI 官方的明细对象。 */
+  readonly prompt_tokens_details?: { readonly cached_tokens?: number } | null
 }
 
 /** 响应体（只取需要的字段）。 */

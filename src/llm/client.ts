@@ -55,10 +55,22 @@ export interface LlmClientOptions {
 export function normalizeUsage(raw: RawUsage | undefined): NormalizedUsage | null {
   if (!raw) return null
   const pick = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  /** 按顺序取第一个存在的数值（各家字段名不同，见 RawUsage 的说明）。 */
+  const pickFirst = (...candidates: readonly unknown[]): number | null => {
+    for (const c of candidates) {
+      const v = pick(c)
+      if (v !== null) return v
+    }
+    return null
+  }
   return {
     inputTokens: pick(raw.prompt_tokens),
     outputTokens: pick(raw.completion_tokens),
-    cacheReadTokens: pick(raw.prompt_cache_hit_tokens),
+    cacheReadTokens: pickFirst(
+      raw.prompt_cache_hit_tokens,
+      raw.prompt_tokens_details?.cached_tokens,
+      raw.cached_tokens,
+    ),
     cacheMissTokens: pick(raw.prompt_cache_miss_tokens),
   }
 }
